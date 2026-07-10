@@ -1,0 +1,28 @@
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# Local-only runtime configuration
+.env
+.env.*
+!.env.example
+application-local.yml
+application-*.local.yml
+*.local.yml
+*.local.yaml
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*~

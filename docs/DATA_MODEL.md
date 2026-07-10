@@ -1,0 +1,263 @@
+# 数据模型
+
+## 实体层级
+
+```text
+Organization 企业
+    └── Team 团队
+          └── Application 应用
+                └── Virtual API Key 虚拟密钥
+```
+
+每一层都可以配置：
+
+- 预算
+- RPM
+- TPM
+- 最大并发数
+- 可访问模型
+- 有效期
+- 告警阈值
+
+多级限制最终取最严格值。
+
+## 核心表分组
+
+身份和租户：
+
+- `organization`
+- `team`
+- `team_member`
+- `application`
+- `virtual_api_key`
+
+模型管理：
+
+- `provider`
+- `model`
+- `model_deployment`
+- `model_route`
+- `route_target`
+
+限流和预算：
+
+- `rate_limit_policy`
+- `budget`
+- `quota_account`
+- `quota_transaction`
+
+请求和计费：
+
+- `ai_request`
+- `usage_record`
+- `billing_record`
+- `billing_daily_summary`
+
+可靠消息：
+
+- `mq_consume_record`
+
+## API Key 上下文
+
+网关主链路使用的缓存对象：
+
+```java
+public record ApiKeyContext(
+        Long keyId,
+        Long organizationId,
+        Long teamId,
+        Long applicationId,
+        Set<String> allowedModels,
+        RateLimitPolicy rateLimitPolicy,
+        BudgetPolicy budgetPolicy,
+        boolean enabled
+) {}
+```
+
+虚拟 Key 设计约束：
+
+- Redis Key 和数据库认证字段使用虚拟 Key 的哈希值。
+- 页面展示只允许使用 Key 前缀。
+- 明文虚拟 Key 只在创建时返回一次。
+- 真实 Provider 凭据不暴露给业务应用。
+
+## ai_request
+
+请求事实表记录一次模型调用发生了什么。
+
+```sql
+CREATE TABLE ai_request (
+    id BIGINT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL,
+    organization_id BIGINT NOT NULL,
+    team_id BIGINT NOT NULL,
+    application_id BIGINT NOT NULL,
+    api_key_id BIGINT NOT NULL,
+    requested_model VARCHAR(100) NOT NULL,
+    actual_provider VARCHAR(50),
+    actual_model VARCHAR(100),
+    stream_enabled TINYINT NOT NULL,
+    input_tokens INT DEFAULT 0,
+    output_tokens INT DEFAULT 0,
+    estimated_tokens INT DEFAULT 0,
+    status VARCHAR(32) NOT NULL,
+    error_code VARCHAR(64),
+    duration_ms BIGINT,
+    first_token_ms BIGINT,
+    created_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    UNIQUE KEY uk_request_id(request_id),
+    KEY idx_team_created(team_id, created_at),
+    KEY idx_application_created(application_id, created_at)
+);
+```
+
+## usage_record
+
+用量事实表记录 Token 和 Provider 返回的 Usage 信息。
+
+关键字段：
+
+- `request_id`
+- `organization_id`
+- `team_id`
+- `application_id`
+- `api_key_id`
+- `provider`
+- `model`
+- `input_tokens`
+- `output_tokens`
+- `total_tokens`
+- `usage_source`
+- `status`
+- `occurred_at`
+
+`usage_source` 用于区分：
+
+- Provider 原始 Usage。
+- 网关流式片段估算。
+- 后续账单回查。
+- 人工补偿。
+
+## quota_account
+
+额度账户记录实时账户状态，但最终正确性必须结合流水校验。
+
+关键字段：
+
+- `account_id`
+- `account_type`
+- `owner_id`
+- `available_tokens`
+- `frozen_tokens`
+- `consumed_tokens`
+- `version`
+- `updated_at`
+
+## quota_transaction
+
+额度流水是账本核心，不能只维护余额。
+
+```sql
+CREATE TABLE quota_transaction (
+    id BIGINT PRIMARY KEY,
+    transaction_no VARCHAR(64) NOT NULL,
+    account_id BIGINT NOT NULL,
+    request_id VARCHAR(64),
+    transaction_type VARCHAR(32) NOT NULL,
+    amount BIGINT NOT NULL,
+    balance_after BIGINT NOT NULL,
+    event_id VARCHAR(64),
+    created_at DATETIME NOT NULL,
+    UNIQUE KEY uk_transaction_no(transaction_no),
+    UNIQUE KEY uk_event_type(event_id, transaction_type),
+    KEY idx_account_created(account_id, created_at)
+);
+```
+
+交易类型：
+
+- `GRANT`：发放
+- `FREEZE`：冻结
+- `CONSUME`：消费
+- `RELEASE`：解冻
+- `REFUND`：退还
+- `EXPIRE`：过期
+- `ADJUST`：人工调整
+
+## billing_record
+
+账单明细记录费用归因。
+
+关键字段：
+
+- `billing_id`
+- `request_id`
+- `organization_id`
+- `team_id`
+- `application_id`
+- `api_key_id`
+- `provider`
+- `model`
+- `input_tokens`
+- `output_tokens`
+- `unit_price`
+- `amount`
+- `currency`
+- `billing_type`
+- `created_at`
+
+建议唯一约束：
+
+```sql
+UNIQUE KEY uk_request_billing(request_id, billing_type)
+```
+
+## mq_consume_record
+
+消费者幂等记录。
+
+```sql
+CREATE TABLE mq_consume_record (
+    event_id VARCHAR(64) NOT NULL,
+    consumer_group VARCHAR(64) NOT NULL,
+    consumed_at DATETIME NOT NULL,
+    PRIMARY KEY (event_id, consumer_group)
+);
+```
+
+账单消费者应同时依赖：
+
+- 消费记录表。
+- 业务表唯一约束。
+
+不要只使用 Redis 去重，因为账单数据需要长期正确。
+
+## 三套事实
+
+ModelGate 不把单一表当成全部事实来源。
+
+- `ai_request`：请求事实。
+- `usage_record`：用量事实。
+- `quota_transaction` 和 `billing_record`：额度和费用事实。
+
+每日对账需要校验：
+
+```text
+成功请求数量
+=
+Usage 成功记录数量
+=
+消费流水数量
+```
+
+并校验：
+
+```text
+账户初始额度
++ 发放
++ 退款
+- 消费
+- 过期
+= 当前余额
+```

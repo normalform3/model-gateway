@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: ${MODELGATE_MYSQL_URL}
+    username: ${MODELGATE_MYSQL_USERNAME}
+    password: ${MODELGATE_MYSQL_PASSWORD}
+  data:
+    redis:
+      host: ${MODELGATE_REDIS_HOST}
+      port: ${MODELGATE_REDIS_PORT}
+      password: ${MODELGATE_REDIS_PASSWORD}
+      database: ${MODELGATE_REDIS_DATABASE:0}
+
+modelgate:
+  rocketmq:
+    enabled: ${MODELGATE_ROCKETMQ_ENABLED:true}
+    endpoints: ${MODELGATE_ROCKETMQ_ENDPOINTS}
+    topic: ${MODELGATE_ROCKETMQ_TOPIC:AI_USAGE_EVENT}
+    producer-group: ${MODELGATE_ROCKETMQ_PRODUCER_GROUP:modelgate-usage-producer}
