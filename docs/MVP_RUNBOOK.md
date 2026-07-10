@@ -43,6 +43,43 @@ curl -X POST http://localhost:8080/admin/bootstrap/demo
 
 响应中记录 `organizationId`、`teamId`、`applicationId`。
 
+## 创建团队和成员 Key
+
+管理员模块可以创建团队和负责人：
+
+```bash
+curl -X POST http://localhost:8080/admin/teams \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "organizationId": 1,
+    "name": "AI Platform Team",
+    "keyRpm": 60,
+    "teamRpm": 600,
+    "teamConcurrency": 20,
+    "modelConcurrency": 50,
+    "ownerName": "Team Owner",
+    "ownerEmail": "team-owner@example.com"
+  }'
+```
+
+再添加成员，并为该成员创建独立虚拟 Key。成员 Key 是按人计量的归因依据：
+
+```bash
+curl -X POST http://localhost:8080/admin/teams/1/members \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Developer One","email":"developer-one@example.com"}'
+
+curl -X POST http://localhost:8080/admin/teams/1/members/2/api-keys \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "applicationId": 1,
+    "name": "developer-one-dev-key",
+    "allowedModels": ["smart-chat"],
+    "expiresAt": null,
+    "createdByMemberId": 1
+  }'
+```
+
 ## 创建虚拟 Key
 
 ```bash

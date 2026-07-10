@@ -80,6 +80,78 @@ data: [DONE]
 
 MVP 控制面接口可以先面向内部管理后台，不要求完全公开。
 
+## 团队和成员管理
+
+MVP 暂不引入真实登录和 RBAC，但控制面先落企业、团队、成员和成员 Key 的数据关系。
+
+### 创建团队
+
+```http
+POST /admin/teams
+Content-Type: application/json
+```
+
+```json
+{
+  "organizationId": 1,
+  "name": "AI Platform Team",
+  "keyRpm": 60,
+  "teamRpm": 600,
+  "teamConcurrency": 20,
+  "modelConcurrency": 50,
+  "ownerName": "Team Owner",
+  "ownerEmail": "team-owner@example.com"
+}
+```
+
+创建团队时会同时创建一个 `OWNER` 成员、一个默认应用和一个团队额度账户。
+
+### 查询团队
+
+```http
+GET /admin/teams
+```
+
+响应包含团队基础信息、负责人、成员数量、Key 数量和 `defaultApplicationId`。
+
+### 管理成员
+
+```http
+GET /admin/teams/{teamId}/members
+POST /admin/teams/{teamId}/members
+PATCH /admin/teams/{teamId}/members/{memberId}
+```
+
+新增成员请求：
+
+```json
+{
+  "name": "Developer One",
+  "email": "developer-one@example.com"
+}
+```
+
+成员角色使用 `OWNER` 或 `MEMBER`。
+
+### 为成员创建虚拟 Key
+
+```http
+POST /admin/teams/{teamId}/members/{memberId}/api-keys
+Content-Type: application/json
+```
+
+```json
+{
+  "applicationId": 100,
+  "name": "developer-one-dev-key",
+  "allowedModels": ["smart-chat"],
+  "expiresAt": "2026-12-31T23:59:59+08:00",
+  "createdByMemberId": 10
+}
+```
+
+响应仍只在创建时返回一次明文 Key。成员级计量以该独立 Key 的 `owner_member_id` 归因，再聚合到团队和企业。
+
 ### 创建虚拟 Key
 
 ```http
@@ -147,6 +219,8 @@ GET /admin/applications/{applicationId}/requests?from=2026-07-01&to=2026-07-10
   "items": [
     {
       "requestId": "req-example-001",
+      "memberId": 11,
+      "memberName": "Developer One",
       "requestedModel": "smart-chat",
       "actualProvider": "mock",
       "actualModel": "mock-chat",

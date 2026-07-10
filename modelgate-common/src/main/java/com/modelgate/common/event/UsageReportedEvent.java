@@ -8,6 +8,7 @@ public record UsageReportedEvent(
         long organizationId,
         long teamId,
         long applicationId,
+        Long memberId,
         long apiKeyId,
         String provider,
         String model,

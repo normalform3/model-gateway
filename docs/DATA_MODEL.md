@@ -5,6 +5,7 @@
 ```text
 Organization 企业
     └── Team 团队
+          ├── Team Member 团队成员
           └── Application 应用
                 └── Virtual API Key 虚拟密钥
 ```
@@ -67,6 +68,8 @@ public record ApiKeyContext(
         Long organizationId,
         Long teamId,
         Long applicationId,
+        Long memberId,
+        Long quotaAccountId,
         Set<String> allowedModels,
         RateLimitPolicy rateLimitPolicy,
         BudgetPolicy budgetPolicy,
@@ -80,6 +83,23 @@ public record ApiKeyContext(
 - 页面展示只允许使用 Key 前缀。
 - 明文虚拟 Key 只在创建时返回一次。
 - 真实 Provider 凭据不暴露给业务应用。
+- 成员级计量依赖独立虚拟 Key：团队负责人申领和管理 Key，但分配给每个成员的 Key 必须绑定 `owner_member_id`，不能用共享 Key 伪造按人统计。
+
+## team_member
+
+团队成员表记录团队负责人和普通成员。
+
+关键字段：
+
+- `organization_id`
+- `team_id`
+- `name`
+- `email`
+- `role`：`OWNER` 或 `MEMBER`
+- `enabled`
+- `created_at`
+
+`virtual_api_key.owner_member_id` 指向实际使用者，`created_by_member_id` 指向创建/发放者。MVP 暂不做登录和 RBAC 校验，但数据关系先落库，便于后续接入权限系统。
 
 ## ai_request
 
@@ -93,6 +113,7 @@ CREATE TABLE ai_request (
     team_id BIGINT NOT NULL,
     application_id BIGINT NOT NULL,
     api_key_id BIGINT NOT NULL,
+    member_id BIGINT,
     requested_model VARCHAR(100) NOT NULL,
     actual_provider VARCHAR(50),
     actual_model VARCHAR(100),
@@ -123,6 +144,7 @@ CREATE TABLE ai_request (
 - `team_id`
 - `application_id`
 - `api_key_id`
+- `member_id`
 - `provider`
 - `model`
 - `input_tokens`

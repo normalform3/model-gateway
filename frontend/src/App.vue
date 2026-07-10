@@ -7,14 +7,23 @@ import {
   bootstrapDemo,
   completeChat,
   createApiKey,
+  createMemberApiKey,
+  createTeam,
+  createTeamMember,
   fetchQuota,
   fetchRequestLogs,
+  fetchTeamMembers,
+  fetchTeams,
   streamChat,
   type BootstrapDemoResponse,
   type ChatCompletionRequest,
+  type CreateMemberApiKeyRequest,
   type CreateApiKeyResponse,
+  type CreateTeamRequest,
   type QuotaResponse,
-  type RequestLogItem
+  type RequestLogItem,
+  type TeamMemberItem,
+  type TeamSummary
 } from "./api";
 
 const STORAGE_KEY = "modelgate-frontend-state";
@@ -25,6 +34,7 @@ type CapabilityState = "ready" | "placeholder";
 
 interface PersistedState {
   demo: BootstrapDemoResponse | null;
+  selectedTeamId: number | null;
 }
 
 interface RoleView {
@@ -162,6 +172,9 @@ const userCapabilityCards: CapabilityCard[] = [
 ];
 
 const demo = ref<BootstrapDemoResponse | null>(null);
+const teams = ref<TeamSummary[]>([]);
+const members = ref<TeamMemberItem[]>([]);
+const selectedTeamId = ref<number | null>(null);
 const quota = ref<QuotaResponse | null>(null);
 const logs = ref<RequestLogItem[]>([]);
 const keyResult = ref<CreateApiKeyResponse | null>(null);
@@ -171,6 +184,9 @@ const lastError = ref("");
 const activeRole = ref<RoleKey>("platform-admin");
 
 const demoState = ref<StageState>("idle");
+const teamState = ref<StageState>("idle");
+const memberState = ref<StageState>("idle");
+const memberKeyState = ref<StageState>("idle");
 const keyState = ref<StageState>("idle");
 const quotaState = ref<StageState>("idle");
 const logsState = ref<StageState>("idle");
@@ -178,6 +194,29 @@ const chatState = ref<StageState>("idle");
 
 const keyForm = reactive({
   name: "codereader-dev",
+  allowedModels: "smart-chat",
+  expiresAt: ""
+});
+
+const teamForm = reactive({
+  organizationId: 1,
+  name: "AI Platform Team",
+  ownerName: "Team Owner",
+  ownerEmail: "team-owner@example.com",
+  keyRpm: 60,
+  teamRpm: 600,
+  teamConcurrency: 20,
+  modelConcurrency: 50
+});
+
+const memberForm = reactive({
+  name: "Developer One",
+  email: "developer-one@example.com"
+});
+
+const memberKeyForm = reactive({
+  memberId: null as number | null,
+  name: "member-dev-key",
   allowedModels: "smart-chat",
   expiresAt: ""
 });
@@ -194,9 +233,13 @@ let quotaChart: echarts.ECharts | null = null;
 let statusChart: echarts.ECharts | null = null;
 
 const currentRole = computed(() => roleViews.find((item) => item.key === activeRole.value) ?? roleViews[0]);
-const contextReady = computed(() => demo.value !== null);
+const selectedTeam = computed(() => teams.value.find((item) => item.teamId === selectedTeamId.value) ?? null);
+const currentTeamId = computed(() => selectedTeam.value?.teamId ?? demo.value?.teamId ?? null);
+const currentApplicationId = computed(() => selectedTeam.value?.defaultApplicationId || demo.value?.applicationId || null);
+const contextReady = computed(() => currentTeamId.value !== null && currentApplicationId.value !== null);
 const keyReady = computed(() => apiKey.value.trim().length > 0);
 const logicalModel = computed(() => demo.value?.logicalModel ?? "smart-chat");
+const selectedTeamReady = computed(() => selectedTeam.value !== null);
 const isTeamAdmin = computed(() => activeRole.value === "team-admin");
 const isDeveloper = computed(() => activeRole.value === "developer");
 const totalQuota = computed(() => {
@@ -221,6 +264,7 @@ const visibleLogs = computed(() => (isDeveloper.value ? logs.value.slice(0, 8) :
 onMounted(() => {
   restoreState();
   window.addEventListener("resize", resizeCharts);
+  void refreshTeams();
   void nextTick(renderCharts);
 });
 
@@ -234,7 +278,7 @@ watch([quota, logs], () => {
   void nextTick(renderCharts);
 });
 
-watch(demo, persistState, { deep: true });
+watch([demo, selectedTeamId], persistState, { deep: true });
 
 function selectRole(role: RoleKey): void {
   activeRole.value = role;
@@ -246,19 +290,139 @@ async function initializeDemo(): Promise<void> {
   lastError.value = "";
   try {
     demo.value = await bootstrapDemo();
+    teamForm.organizationId = demo.value.organizationId;
     keyForm.allowedModels = demo.value.logicalModel;
+    memberKeyForm.allowedModels = demo.value.logicalModel;
     demoState.value = "success";
     ElMessage.success("Demo 上下文已初始化");
-    await Promise.all([refreshQuota(), refreshLogs()]);
+    await Promise.all([refreshTeams(), refreshQuota(), refreshLogs()]);
   } catch (error) {
     demoState.value = "error";
     showError(error, "初始化 Demo 失败");
   }
 }
 
+async function refreshTeams(): Promise<void> {
+  teamState.value = "loading";
+  try {
+    const response = await fetchTeams();
+    teams.value = response.items;
+    if (selectedTeamId.value && !teams.value.some((item) => item.teamId === selectedTeamId.value)) {
+      selectedTeamId.value = null;
+    }
+    teamState.value = "success";
+    if (selectedTeamId.value) {
+      await refreshMembers();
+    }
+  } catch (error) {
+    teamState.value = "error";
+    showError(error, "刷新团队失败");
+  }
+}
+
+async function submitTeam(): Promise<void> {
+  teamState.value = "loading";
+  lastError.value = "";
+  const payload: CreateTeamRequest = {
+    organizationId: teamForm.organizationId,
+    name: teamForm.name,
+    keyRpm: teamForm.keyRpm,
+    teamRpm: teamForm.teamRpm,
+    teamConcurrency: teamForm.teamConcurrency,
+    modelConcurrency: teamForm.modelConcurrency,
+    ownerName: teamForm.ownerName,
+    ownerEmail: teamForm.ownerEmail
+  };
+  try {
+    const created = await createTeam(payload);
+    selectedTeamId.value = created.teamId;
+    ElMessage.success("团队和负责人已创建");
+    await Promise.all([refreshTeams(), refreshQuota(), refreshLogs()]);
+  } catch (error) {
+    teamState.value = "error";
+    showError(error, "创建团队失败");
+  }
+}
+
+async function selectTeam(team: TeamSummary): Promise<void> {
+  selectedTeamId.value = team.teamId;
+  memberKeyForm.memberId = null;
+  await Promise.all([refreshMembers(), refreshQuota(), refreshLogs()]);
+}
+
+async function refreshMembers(): Promise<void> {
+  if (!selectedTeamId.value) {
+    members.value = [];
+    return;
+  }
+  memberState.value = "loading";
+  try {
+    const response = await fetchTeamMembers(selectedTeamId.value);
+    members.value = response.items;
+    if (memberKeyForm.memberId && !members.value.some((item) => item.memberId === memberKeyForm.memberId)) {
+      memberKeyForm.memberId = null;
+    }
+    memberState.value = "success";
+  } catch (error) {
+    memberState.value = "error";
+    showError(error, "刷新成员失败");
+  }
+}
+
+async function submitMember(): Promise<void> {
+  if (!selectedTeamId.value) {
+    ElMessage.warning("请先选择团队");
+    return;
+  }
+  memberState.value = "loading";
+  lastError.value = "";
+  try {
+    await createTeamMember(selectedTeamId.value, {
+      name: memberForm.name,
+      email: memberForm.email
+    });
+    ElMessage.success("成员已添加");
+    await Promise.all([refreshMembers(), refreshTeams()]);
+  } catch (error) {
+    memberState.value = "error";
+    showError(error, "添加成员失败");
+  }
+}
+
+async function submitMemberApiKey(): Promise<void> {
+  if (!selectedTeam.value || !memberKeyForm.memberId || !currentApplicationId.value) {
+    ElMessage.warning("请先选择团队和成员");
+    return;
+  }
+  memberKeyState.value = "loading";
+  lastError.value = "";
+  const allowedModels = memberKeyForm.allowedModels
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const payload: CreateMemberApiKeyRequest = {
+    applicationId: currentApplicationId.value,
+    name: memberKeyForm.name,
+    allowedModels,
+    expiresAt: memberKeyForm.expiresAt || null,
+    createdByMemberId: selectedTeam.value.ownerMemberId
+  };
+  try {
+    keyResult.value = await createMemberApiKey(selectedTeam.value.teamId, memberKeyForm.memberId, payload);
+    apiKey.value = keyResult.value.apiKey;
+    memberKeyState.value = "success";
+    keyState.value = "success";
+    ElMessage.success("成员虚拟 Key 已创建，请在离开页面前保存");
+    await refreshTeams();
+  } catch (error) {
+    memberKeyState.value = "error";
+    showError(error, "创建成员 Key 失败");
+  }
+}
+
 async function submitApiKey(): Promise<void> {
-  if (!demo.value) {
-    ElMessage.warning("请先初始化 Demo 上下文");
+  if (!contextReady.value || !currentTeamId.value || !currentApplicationId.value) {
+    ElMessage.warning("请先初始化 Demo 或选择团队");
     return;
   }
 
@@ -270,9 +434,9 @@ async function submitApiKey(): Promise<void> {
       .map((item) => item.trim())
       .filter(Boolean);
     keyResult.value = await createApiKey({
-      organizationId: demo.value.organizationId,
-      teamId: demo.value.teamId,
-      applicationId: demo.value.applicationId,
+      organizationId: selectedTeam.value?.organizationId ?? demo.value?.organizationId ?? teamForm.organizationId,
+      teamId: currentTeamId.value,
+      applicationId: currentApplicationId.value,
       name: keyForm.name,
       allowedModels,
       expiresAt: keyForm.expiresAt || null
@@ -295,12 +459,12 @@ async function copyApiKey(): Promise<void> {
 }
 
 async function refreshQuota(): Promise<void> {
-  if (!demo.value) {
+  if (!currentTeamId.value) {
     return;
   }
   quotaState.value = "loading";
   try {
-    quota.value = await fetchQuota(demo.value.teamId);
+    quota.value = await fetchQuota(currentTeamId.value);
     quotaState.value = "success";
   } catch (error) {
     quotaState.value = "error";
@@ -309,12 +473,12 @@ async function refreshQuota(): Promise<void> {
 }
 
 async function refreshLogs(): Promise<void> {
-  if (!demo.value) {
+  if (!currentApplicationId.value) {
     return;
   }
   logsState.value = "loading";
   try {
-    const response = await fetchRequestLogs(demo.value.applicationId);
+    const response = await fetchRequestLogs(currentApplicationId.value);
     logs.value = response.items;
     logsState.value = "success";
   } catch (error) {
@@ -371,19 +535,19 @@ function renderQuotaChart(): void {
   quotaChart.setOption({
     tooltip: {
       trigger: "item",
-      backgroundColor: "#fffaf1",
-      borderColor: "#d8c7b6",
-      textStyle: { color: "#2b2621" }
+      backgroundColor: "#ffffff",
+      borderColor: "#bfd7ef",
+      textStyle: { color: "#182233" }
     },
-    color: ["#66806f", "#b9823d", "#b85d4c"],
+    color: ["#1684ff", "#2bbbc3", "#d49a28"],
     series: [
       {
         type: "pie",
         radius: ["58%", "78%"],
         center: ["50%", "52%"],
         avoidLabelOverlap: true,
-        label: { color: "#2b2621", formatter: "{b}\n{c}" },
-        labelLine: { lineStyle: { color: "#b7a99b" } },
+        label: { color: "#182233", formatter: "{b}\n{c}" },
+        labelLine: { lineStyle: { color: "#a8bfd5" } },
         data: current
           ? [
               { value: current.availableTokens, name: "可用" },
@@ -405,30 +569,30 @@ function renderStatusChart(): void {
     grid: { left: 24, right: 12, top: 24, bottom: 24 },
     tooltip: {
       trigger: "axis",
-      backgroundColor: "#fffaf1",
-      borderColor: "#d8c7b6",
-      textStyle: { color: "#2b2621" }
+      backgroundColor: "#ffffff",
+      borderColor: "#bfd7ef",
+      textStyle: { color: "#182233" }
     },
     xAxis: {
       type: "category",
       data: ["成功", "失败"],
-      axisLine: { lineStyle: { color: "#b7a99b" } },
-      axisLabel: { color: "#655b52" }
+      axisLine: { lineStyle: { color: "#a8bfd5" } },
+      axisLabel: { color: "#657386" }
     },
     yAxis: {
       type: "value",
       minInterval: 1,
-      splitLine: { lineStyle: { color: "rgba(98, 78, 61, 0.14)" } },
-      axisLabel: { color: "#655b52" }
+      splitLine: { lineStyle: { color: "rgba(168, 191, 213, 0.28)" } },
+      axisLabel: { color: "#657386" }
     },
     series: [
       {
         type: "bar",
         barWidth: 32,
-        itemStyle: { borderRadius: [4, 4, 0, 0] },
+        itemStyle: { borderRadius: [12, 12, 4, 4] },
         data: [
-          { value: successCount.value, itemStyle: { color: "#66806f" } },
-          { value: failedCount.value, itemStyle: { color: "#b85d4c" } }
+          { value: successCount.value, itemStyle: { color: "#1684ff" } },
+          { value: failedCount.value, itemStyle: { color: "#e15c6b" } }
         ]
       }
     ]
@@ -448,8 +612,11 @@ function restoreState(): void {
   try {
     const state = JSON.parse(raw) as PersistedState;
     demo.value = state.demo;
+    selectedTeamId.value = state.selectedTeamId ?? null;
     if (state.demo?.logicalModel) {
       keyForm.allowedModels = state.demo.logicalModel;
+      memberKeyForm.allowedModels = state.demo.logicalModel;
+      teamForm.organizationId = state.demo.organizationId;
     }
     if (state.demo) {
       void Promise.all([refreshQuota(), refreshLogs()]);
@@ -461,7 +628,8 @@ function restoreState(): void {
 
 function persistState(): void {
   const state: PersistedState = {
-    demo: demo.value
+    demo: demo.value,
+    selectedTeamId: selectedTeamId.value
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
@@ -529,6 +697,7 @@ function formatTime(value: string | null | undefined): string {
       <nav class="rail-nav" aria-label="工作台导航">
         <a href="#overview">角色概览</a>
         <a href="#capabilities">职责范围</a>
+        <a href="#teams">团队管理</a>
         <a href="#workspace">MVP 闭环</a>
         <a href="#observability">观测日志</a>
       </nav>
@@ -566,11 +735,11 @@ function formatTime(value: string | null | undefined): string {
         </article>
         <article class="metric-tile">
           <span>Team</span>
-          <strong>{{ demo?.teamId ?? "-" }}</strong>
+          <strong>{{ currentTeamId ?? "-" }}</strong>
         </article>
         <article class="metric-tile">
           <span>Application</span>
-          <strong>{{ demo?.applicationId ?? "-" }}</strong>
+          <strong>{{ currentApplicationId ?? "-" }}</strong>
         </article>
         <article class="metric-tile accent">
           <span>Logical model</span>
@@ -592,6 +761,187 @@ function formatTime(value: string | null | undefined): string {
             {{ item.state === "ready" ? "当前闭环" : "待接入" }}
           </span>
         </article>
+      </section>
+
+      <section class="panel team-admin-panel" id="teams">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Teams / Members / Member keys</p>
+            <h2>团队与成员管理</h2>
+          </div>
+          <el-button :loading="teamState === 'loading'" @click="refreshTeams">刷新团队</el-button>
+        </div>
+
+        <div class="team-admin-grid">
+          <div class="team-form-column">
+            <el-form label-position="top" class="dense-form">
+              <el-form-item label="企业 ID">
+                <el-input-number v-model="teamForm.organizationId" :min="1" />
+              </el-form-item>
+              <el-form-item label="团队名称">
+                <el-input v-model="teamForm.name" />
+              </el-form-item>
+              <div class="limit-grid">
+                <el-form-item label="Key RPM">
+                  <el-input-number v-model="teamForm.keyRpm" :min="1" />
+                </el-form-item>
+                <el-form-item label="Team RPM">
+                  <el-input-number v-model="teamForm.teamRpm" :min="1" />
+                </el-form-item>
+                <el-form-item label="Team 并发">
+                  <el-input-number v-model="teamForm.teamConcurrency" :min="1" />
+                </el-form-item>
+                <el-form-item label="模型并发">
+                  <el-input-number v-model="teamForm.modelConcurrency" :min="1" />
+                </el-form-item>
+              </div>
+              <el-form-item label="负责人姓名">
+                <el-input v-model="teamForm.ownerName" />
+              </el-form-item>
+              <el-form-item label="负责人邮箱">
+                <el-input v-model="teamForm.ownerEmail" />
+              </el-form-item>
+            </el-form>
+            <div class="panel-actions">
+              <el-button type="primary" :loading="teamState === 'loading'" @click="submitTeam">
+                新建团队
+              </el-button>
+            </div>
+          </div>
+
+          <div class="team-list-column">
+            <el-table
+              v-if="teams.length"
+              :data="teams"
+              class="request-table"
+              height="292"
+              row-key="teamId"
+              highlight-current-row
+              @row-click="selectTeam"
+            >
+              <el-table-column prop="name" label="团队" min-width="150" />
+              <el-table-column prop="ownerName" label="负责人" min-width="130" />
+              <el-table-column label="成员/Key" width="110">
+                <template #default="{ row }">{{ row.memberCount }} / {{ row.keyCount }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="row.enabled ? 'success' : 'info'" effect="plain">
+                    {{ row.enabled ? "启用" : "停用" }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-else class="compact-empty" description="暂无团队" />
+          </div>
+        </div>
+
+        <div class="member-admin-grid">
+          <article class="sub-panel">
+            <div class="panel-head compact-head">
+              <div>
+                <p class="eyebrow">Selected team</p>
+                <h2>{{ selectedTeam?.name ?? "未选择团队" }}</h2>
+              </div>
+              <el-tag effect="plain">
+                App #{{ currentApplicationId ?? "-" }}
+              </el-tag>
+            </div>
+
+            <el-form label-position="top" class="dense-form">
+              <el-form-item label="成员姓名">
+                <el-input v-model="memberForm.name" :disabled="!selectedTeamReady" />
+              </el-form-item>
+              <el-form-item label="成员邮箱">
+                <el-input v-model="memberForm.email" :disabled="!selectedTeamReady" />
+              </el-form-item>
+            </el-form>
+            <div class="panel-actions">
+              <el-button
+                type="primary"
+                :disabled="!selectedTeamReady"
+                :loading="memberState === 'loading'"
+                @click="submitMember"
+              >
+                添加成员
+              </el-button>
+            </div>
+          </article>
+
+          <article class="sub-panel">
+            <div class="panel-head compact-head">
+              <div>
+                <p class="eyebrow">Member API Key</p>
+                <h2>给成员发放 Key</h2>
+              </div>
+              <el-button :disabled="!selectedTeamReady" :loading="memberState === 'loading'" @click="refreshMembers">
+                刷新成员
+              </el-button>
+            </div>
+
+            <el-form label-position="top" class="dense-form">
+              <el-form-item label="成员">
+                <el-select
+                  v-model="memberKeyForm.memberId"
+                  placeholder="选择成员"
+                  class="full-control"
+                  :disabled="!selectedTeamReady"
+                >
+                  <el-option
+                    v-for="member in members"
+                    :key="member.memberId"
+                    :label="`${member.name} / ${member.email}`"
+                    :value="member.memberId"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="Key 名称">
+                <el-input v-model="memberKeyForm.name" :disabled="!selectedTeamReady" />
+              </el-form-item>
+              <el-form-item label="允许模型">
+                <el-input v-model="memberKeyForm.allowedModels" :disabled="!selectedTeamReady" />
+              </el-form-item>
+              <el-form-item label="过期时间">
+                <el-input
+                  v-model="memberKeyForm.expiresAt"
+                  placeholder="可留空，例如 2026-12-31T23:59:59+08:00"
+                  :disabled="!selectedTeamReady"
+                />
+              </el-form-item>
+            </el-form>
+            <div class="panel-actions">
+              <el-button
+                type="primary"
+                :disabled="!selectedTeamReady || !memberKeyForm.memberId"
+                :loading="memberKeyState === 'loading'"
+                @click="submitMemberApiKey"
+              >
+                创建成员 Key
+              </el-button>
+            </div>
+          </article>
+        </div>
+
+        <el-table
+          v-if="members.length"
+          :data="members"
+          class="request-table member-table"
+          row-key="memberId"
+        >
+          <el-table-column prop="name" label="成员" min-width="140" />
+          <el-table-column prop="email" label="邮箱" min-width="220" />
+          <el-table-column label="角色" width="110">
+            <template #default="{ row }">
+              <el-tag :type="row.role === 'OWNER' ? 'success' : 'info'" effect="plain">{{ row.role }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">{{ row.enabled ? "启用" : "停用" }}</template>
+          </el-table-column>
+          <el-table-column label="创建时间" min-width="150">
+            <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+          </el-table-column>
+        </el-table>
       </section>
 
       <el-alert
@@ -758,6 +1108,9 @@ function formatTime(value: string | null | undefined): string {
           row-key="requestId"
         >
           <el-table-column prop="requestId" label="Request ID" min-width="220" />
+          <el-table-column label="成员" min-width="130">
+            <template #default="{ row }">{{ row.memberName ?? "-" }}</template>
+          </el-table-column>
           <el-table-column prop="requestedModel" label="逻辑模型" width="120" />
           <el-table-column prop="actualProvider" label="Provider" width="110" />
           <el-table-column prop="actualModel" label="实际模型" width="120" />

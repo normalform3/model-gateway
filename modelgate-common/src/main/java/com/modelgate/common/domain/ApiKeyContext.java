@@ -8,6 +8,7 @@ public record ApiKeyContext(
         long organizationId,
         long teamId,
         long applicationId,
+        Long memberId,
         long quotaAccountId,
         Set<String> allowedModels,
         RateLimitPolicy rateLimitPolicy,

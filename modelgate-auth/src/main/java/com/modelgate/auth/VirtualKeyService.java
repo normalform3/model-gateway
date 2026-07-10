@@ -2,6 +2,7 @@ package com.modelgate.auth;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.modelgate.common.api.AdminDtos.CreateMemberApiKeyRequest;
 import com.modelgate.common.api.AdminDtos.CreateApiKeyRequest;
 import com.modelgate.common.api.AdminDtos.CreateApiKeyResponse;
 import com.modelgate.common.domain.ApiKeyContext;
@@ -46,6 +47,14 @@ public class VirtualKeyService {
         String prefix = apiKey.substring(0, Math.min(apiKey.length(), 18));
         String hash = sha256(apiKey);
         long keyId = adminRepository.insertApiKey(request, prefix, hash);
+        return new CreateApiKeyResponse(keyId, prefix, apiKey, true);
+    }
+
+    public CreateApiKeyResponse createForMember(long teamId, long memberId, CreateMemberApiKeyRequest request) {
+        String apiKey = "mg-key-" + randomToken();
+        String prefix = apiKey.substring(0, Math.min(apiKey.length(), 18));
+        String hash = sha256(apiKey);
+        long keyId = adminRepository.insertMemberApiKey(teamId, memberId, request, prefix, hash);
         return new CreateApiKeyResponse(keyId, prefix, apiKey, true);
     }
 
@@ -148,6 +157,7 @@ public class VirtualKeyService {
                 Long.toString(context.organizationId()),
                 Long.toString(context.teamId()),
                 Long.toString(context.applicationId()),
+                context.memberId() == null ? "" : Long.toString(context.memberId()),
                 Long.toString(context.quotaAccountId()),
                 String.join(",", context.allowedModels()),
                 Integer.toString(context.rateLimitPolicy().keyRpm()),
@@ -161,18 +171,25 @@ public class VirtualKeyService {
 
     private ApiKeyContext decode(String value) {
         String[] p = value.split("\\|", -1);
-        Set<String> models = p[5].isBlank() ? Set.of() : new LinkedHashSet<>(Arrays.asList(p[5].split(",")));
-        OffsetDateTime expiresAt = p[12].isBlank() ? null : OffsetDateTime.parse(p[12]);
+        int offset = p.length >= 14 ? 1 : 0;
+        Long memberId = offset == 0 || p[4].isBlank() ? null : Long.parseLong(p[4]);
+        Set<String> models = p[5 + offset].isBlank() ? Set.of() : new LinkedHashSet<>(Arrays.asList(p[5 + offset].split(",")));
+        OffsetDateTime expiresAt = p[12 + offset].isBlank() ? null : OffsetDateTime.parse(p[12 + offset]);
         return new ApiKeyContext(
                 Long.parseLong(p[0]),
                 Long.parseLong(p[1]),
                 Long.parseLong(p[2]),
                 Long.parseLong(p[3]),
-                Long.parseLong(p[4]),
+                memberId,
+                Long.parseLong(p[4 + offset]),
                 models,
-                new RateLimitPolicy(Integer.parseInt(p[6]), Integer.parseInt(p[7]), Integer.parseInt(p[8]), Integer.parseInt(p[9])),
-                new BudgetPolicy(Long.parseLong(p[10])),
-                Boolean.parseBoolean(p[11]),
+                new RateLimitPolicy(
+                        Integer.parseInt(p[6 + offset]),
+                        Integer.parseInt(p[7 + offset]),
+                        Integer.parseInt(p[8 + offset]),
+                        Integer.parseInt(p[9 + offset])),
+                new BudgetPolicy(Long.parseLong(p[10 + offset])),
+                Boolean.parseBoolean(p[11 + offset]),
                 expiresAt);
     }
 

@@ -22,6 +22,66 @@ export interface CreateApiKeyResponse {
   enabled: boolean;
 }
 
+export interface CreateTeamRequest {
+  organizationId: number;
+  name: string;
+  keyRpm: number;
+  teamRpm: number;
+  teamConcurrency: number;
+  modelConcurrency: number;
+  ownerName: string;
+  ownerEmail: string;
+}
+
+export interface TeamSummary {
+  teamId: number;
+  organizationId: number;
+  defaultApplicationId: number;
+  name: string;
+  enabled: boolean;
+  keyRpm: number;
+  teamRpm: number;
+  teamConcurrency: number;
+  modelConcurrency: number;
+  ownerMemberId: number | null;
+  ownerName: string | null;
+  ownerEmail: string | null;
+  memberCount: number;
+  keyCount: number;
+}
+
+export interface TeamListResponse {
+  items: TeamSummary[];
+}
+
+export interface CreateTeamMemberRequest {
+  name: string;
+  email: string;
+}
+
+export interface TeamMemberItem {
+  memberId: number;
+  organizationId: number;
+  teamId: number;
+  name: string;
+  email: string;
+  role: "OWNER" | "MEMBER";
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface TeamMemberListResponse {
+  items: TeamMemberItem[];
+}
+
+export interface CreateMemberApiKeyRequest {
+  applicationId: number;
+  name: string;
+  allowedModels: string[];
+  expiresAt?: string | null;
+  createdByMemberId?: number | null;
+}
+
 export interface QuotaResponse {
   teamId: number;
   availableTokens: number;
@@ -32,6 +92,8 @@ export interface QuotaResponse {
 
 export interface RequestLogItem {
   requestId: string;
+  memberId: number | null;
+  memberName: string | null;
   requestedModel: string;
   actualProvider: string | null;
   actualModel: string | null;
@@ -132,6 +194,39 @@ export function bootstrapDemo(): Promise<BootstrapDemoResponse> {
 
 export function createApiKey(payload: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
   return requestJson<CreateApiKeyResponse>("/admin/api-keys", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function createTeam(payload: CreateTeamRequest): Promise<TeamSummary> {
+  return requestJson<TeamSummary>("/admin/teams", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function fetchTeams(): Promise<TeamListResponse> {
+  return requestJson<TeamListResponse>("/admin/teams");
+}
+
+export function fetchTeamMembers(teamId: number): Promise<TeamMemberListResponse> {
+  return requestJson<TeamMemberListResponse>(`/admin/teams/${teamId}/members`);
+}
+
+export function createTeamMember(teamId: number, payload: CreateTeamMemberRequest): Promise<TeamMemberItem> {
+  return requestJson<TeamMemberItem>(`/admin/teams/${teamId}/members`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function createMemberApiKey(
+  teamId: number,
+  memberId: number,
+  payload: CreateMemberApiKeyRequest
+): Promise<CreateApiKeyResponse> {
+  return requestJson<CreateApiKeyResponse>(`/admin/teams/${teamId}/members/${memberId}/api-keys`, {
     method: "POST",
     body: JSON.stringify(payload)
   });

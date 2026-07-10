@@ -4,6 +4,10 @@ import com.modelgate.auth.VirtualKeyService;
 import com.modelgate.common.chat.ChatCompletionRequest;
 import com.modelgate.common.chat.ChatMessage;
 import com.modelgate.common.chat.MockBehavior;
+import com.modelgate.common.domain.ApiKeyContext;
+import com.modelgate.common.domain.BudgetPolicy;
+import com.modelgate.common.domain.RateLimitPolicy;
+import com.modelgate.common.event.UsageReportedEvent;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.provider.ProviderRequest;
 import com.modelgate.provider.mock.MockProvider;
@@ -17,6 +21,8 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import reactor.test.StepVerifier;
 
 import java.util.List;
+import java.util.Set;
+import java.time.OffsetDateTime;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,6 +53,48 @@ class MvpUnitTests {
 
         assertThat(estimator.estimateInputTokens(request)).isEqualTo(3);
         assertThat(estimator.maxOutputTokens(request)).isEqualTo(512);
+    }
+
+    @Test
+    void apiKeyContextCanCarryMemberAttribution() {
+        ApiKeyContext context = new ApiKeyContext(
+                10L,
+                1L,
+                2L,
+                3L,
+                4L,
+                5L,
+                Set.of("smart-chat"),
+                new RateLimitPolicy(60, 600, 20, 50),
+                new BudgetPolicy(500_000L),
+                true,
+                null);
+
+        assertThat(context.memberId()).isEqualTo(4L);
+        assertThat(context.modelAllowed("smart-chat")).isTrue();
+    }
+
+    @Test
+    void usageEventCanCarryMemberAttribution() {
+        UsageReportedEvent event = new UsageReportedEvent(
+                "evt-test",
+                "req-test",
+                1L,
+                2L,
+                3L,
+                4L,
+                10L,
+                "mock",
+                "mock-chat",
+                12,
+                8,
+                20,
+                100L,
+                "SUCCESS",
+                OffsetDateTime.now());
+
+        assertThat(event.memberId()).isEqualTo(4L);
+        assertThat(event.totalTokens()).isEqualTo(20);
     }
 
     @Test

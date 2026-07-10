@@ -215,6 +215,7 @@ public class ChatGatewayService {
                 apiKey.organizationId(),
                 apiKey.teamId(),
                 apiKey.applicationId(),
+                apiKey.memberId(),
                 apiKey.keyId(),
                 target.provider(),
                 target.actualModel(),
