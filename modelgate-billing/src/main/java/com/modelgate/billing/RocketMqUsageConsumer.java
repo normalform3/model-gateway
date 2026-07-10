@@ -12,6 +12,7 @@ import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 @Component
 @ConditionalOnProperty(prefix = "modelgate.rocketmq", name = "enabled", havingValue = "true")
@@ -29,11 +30,16 @@ public class RocketMqUsageConsumer implements InitializingBean, DisposableBean {
             @Value("${modelgate.rocketmq.endpoints}") String nameServer,
             @Value("${modelgate.rocketmq.topic:AI_USAGE_EVENT}") String topic
     ) {
+        if (!StringUtils.hasText(nameServer)) {
+            throw new IllegalArgumentException("modelgate.rocketmq.endpoints must be set when RocketMQ is enabled. "
+                    + "Set MODELGATE_ROCKETMQ_ENDPOINTS to a NameServer address such as host:9876.");
+        }
         this.objectMapper = objectMapper;
         this.billingService = billingService;
         this.topic = topic;
         this.consumer = new DefaultMQPushConsumer("modelgate-billing-consumer");
         this.consumer.setNamesrvAddr(nameServer);
+        this.consumer.setVipChannelEnabled(false);
     }
 
     @Override

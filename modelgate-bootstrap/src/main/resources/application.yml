@@ -23,7 +23,7 @@ modelgate:
     request-ttl-seconds: ${MODELGATE_REQUEST_TTL_SECONDS:300}
   rocketmq:
     enabled: ${MODELGATE_ROCKETMQ_ENABLED:false}
-    endpoints: ${MODELGATE_ROCKETMQ_ENDPOINTS:localhost:8081}
+    endpoints: ${MODELGATE_ROCKETMQ_ENDPOINTS:}
     topic: ${MODELGATE_ROCKETMQ_TOPIC:AI_USAGE_EVENT}
     producer-group: ${MODELGATE_ROCKETMQ_PRODUCER_GROUP:modelgate-usage-producer}
 

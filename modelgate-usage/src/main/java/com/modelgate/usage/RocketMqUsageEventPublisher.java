@@ -11,6 +11,7 @@ import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
 
@@ -29,9 +30,15 @@ public class RocketMqUsageEventPublisher implements UsageEventPublisher, Initial
             @Value("${modelgate.rocketmq.producer-group:modelgate-usage-producer}") String producerGroup,
             @Value("${modelgate.rocketmq.topic:AI_USAGE_EVENT}") String topic
     ) {
+        if (!StringUtils.hasText(nameServer)) {
+            throw new IllegalArgumentException("modelgate.rocketmq.endpoints must be set when RocketMQ is enabled. "
+                    + "Set MODELGATE_ROCKETMQ_ENDPOINTS to a NameServer address such as host:9876.");
+        }
         this.objectMapper = objectMapper;
         this.producer = new DefaultMQProducer(producerGroup);
         this.producer.setNamesrvAddr(nameServer);
+        this.producer.setVipChannelEnabled(false);
+        this.producer.setSendMessageWithVIPChannel(false);
         this.topic = topic;
     }
 
