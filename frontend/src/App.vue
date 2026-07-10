@@ -17,7 +17,7 @@ import {
   type RequestLogItem
 } from "./api";
 
-const STORAGE_KEY = "modelgate-console-state";
+const STORAGE_KEY = "modelgate-frontend-state";
 
 type StageState = "idle" | "loading" | "success" | "error";
 

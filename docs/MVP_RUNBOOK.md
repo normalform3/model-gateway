@@ -28,7 +28,7 @@ mvn -pl modelgate-bootstrap -am spring-boot:run
 前端控制台是独立 Vite 工程。先启动后端，再启动前端：
 
 ```bash
-cd modelgate-console
+cd frontend
 npm install
 npm run dev
 ```

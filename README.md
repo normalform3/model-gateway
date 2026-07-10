@@ -102,7 +102,7 @@ model-gate
 │   ├── infrastructure-redis
 │   ├── infrastructure-rocketmq
 │   └── infrastructure-persistence
-├── modelgate-console
+├── frontend
 └── modelgate-common
 ```
 

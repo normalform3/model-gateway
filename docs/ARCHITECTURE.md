@@ -110,7 +110,7 @@ modelgate-usage
 modelgate-billing
 modelgate-provider
 modelgate-infrastructure
-modelgate-console
+frontend
 modelgate-common
 ```
 
