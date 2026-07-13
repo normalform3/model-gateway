@@ -10,7 +10,6 @@ import java.time.OffsetDateTime;
 
 @Repository
 public class BillingRepository {
-    private static final BigDecimal ZERO_PRICE = new BigDecimal("0.00000000");
     private final JdbcTemplate jdbcTemplate;
 
     public BillingRepository(JdbcTemplate jdbcTemplate) {
@@ -52,11 +51,16 @@ public class BillingRepository {
     }
 
     public void insertBilling(UsageReportedEvent event) {
+        Pricing pricing = findPricing(event.provider(), event.model());
+        BigDecimal amount = pricing.inputPricePerMillion()
+                .multiply(BigDecimal.valueOf(event.inputTokens())).movePointLeft(6)
+                .add(pricing.outputPricePerMillion().multiply(BigDecimal.valueOf(event.outputTokens())).movePointLeft(6));
         jdbcTemplate.update("""
                         INSERT IGNORE INTO billing_record(
                             request_id, organization_id, team_id, application_id, api_key_id,
                             member_id, provider, model, input_tokens, output_tokens, unit_price, amount, currency, billing_type, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            , input_unit_price, output_unit_price
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 event.requestId(),
                 event.organizationId(),
@@ -68,11 +72,13 @@ public class BillingRepository {
                 event.model(),
                 event.inputTokens(),
                 event.outputTokens(),
-                ZERO_PRICE,
-                ZERO_PRICE,
-                "TOKENS",
+                pricing.inputPricePerMillion().add(pricing.outputPricePerMillion()),
+                amount,
+                pricing.currency(),
                 "USAGE",
-                JdbcTime.toTimestamp(OffsetDateTime.now()));
+                JdbcTime.toTimestamp(OffsetDateTime.now()),
+                pricing.inputPricePerMillion(),
+                pricing.outputPricePerMillion());
     }
 
     public void insertQuotaConsumeTransaction(UsageReportedEvent event) {
@@ -97,5 +103,21 @@ public class BillingRepository {
                 balanceAfter == null ? 0L : balanceAfter,
                 event.eventId(),
                 JdbcTime.toTimestamp(OffsetDateTime.now()));
+    }
+
+    private Pricing findPricing(String provider, String model) {
+        try {
+            return jdbcTemplate.queryForObject("""
+                            SELECT pm.input_price_per_million, pm.output_price_per_million, pm.currency
+                            FROM provider_model pm JOIN provider p ON p.id = pm.provider_id
+                            WHERE p.name = ? AND pm.model_name = ? ORDER BY pm.id ASC LIMIT 1
+                            """, (rs, rowNum) -> new Pricing(rs.getBigDecimal("input_price_per_million"),
+                    rs.getBigDecimal("output_price_per_million"), rs.getString("currency")), provider, model);
+        } catch (org.springframework.dao.EmptyResultDataAccessException ex) {
+            return new Pricing(BigDecimal.ZERO, BigDecimal.ZERO, "USD");
+        }
+    }
+
+    private record Pricing(BigDecimal inputPricePerMillion, BigDecimal outputPricePerMillion, String currency) {
     }
 }

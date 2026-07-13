@@ -13,6 +13,8 @@ public enum ErrorCode {
     PROVIDER_UNAVAILABLE(503, true, "The provider is temporarily unavailable."),
     BAD_MODEL_REQUEST(400, false, "The model request is invalid."),
     IDEMPOTENCY_CONFLICT(409, false, "The idempotency key is already used by another request."),
+    TEAM_HAS_DEPENDENCIES(409, false, "The team still has dependent resources and cannot be deleted."),
+    USER_HAS_DEPENDENCIES(409, false, "The user still has dependent resources and cannot be deleted."),
     INTERNAL_ERROR(500, true, "Internal server error.");
 
     private final int httpStatus;

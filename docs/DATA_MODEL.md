@@ -5,7 +5,8 @@
 ```text
 Organization 企业
     └── Team 团队
-          ├── Team Member 团队成员
+          ├── Platform User 用户
+          │     └── Team Member 团队成员关系
           └── Application 应用
                 └── Virtual API Key 虚拟密钥
 ```
@@ -27,6 +28,7 @@ Organization 企业
 身份和租户：
 
 - `organization`
+- `platform_user`
 - `team`
 - `team_member`
 - `application`
@@ -35,10 +37,8 @@ Organization 企业
 模型管理：
 
 - `provider`
-- `model`
-- `model_deployment`
-- `model_route`
-- `route_target`
+- `provider_model`
+- `provider_credential`
 
 限流和预算：
 
@@ -84,15 +84,25 @@ public record ApiKeyContext(
 - 明文虚拟 Key 只在创建时返回一次。
 - 真实 Provider 凭据不暴露给业务应用。
 - 成员级计量依赖独立虚拟 Key：团队负责人申领和管理 Key，但分配给每个成员的 Key 必须绑定 `owner_member_id`，不能用共享 Key 伪造按人统计。
+- 一个成员可以在同一应用下拥有多个 Key，用于环境隔离和轮换；首轮不支持无成员归属的共享 Key。
+
+## Provider、直接模型与团队授权
+
+- `provider` 类型为 `MOCK_OPENAI` 或 `OPENAI_COMPATIBLE`；后者保存公开协议的 Base URL。
+- `provider_credential` 一条记录代表一把 Provider API Key，仅保存 AES-GCM 密文、版本、末四位和状态；一个 Provider 可有多条启用凭据。
+- `provider_model.model_name` 是全局唯一的真实模型名，包含输入/输出每百万 Token 单价和币种。
+- `team_direct_model_access` 记录团队可使用的真实模型名。虚拟 Key 的 `allowed_models` 必须是该集合的子集。
+- `global_runtime_policy` 保存全局 RPM 和并发阈值，数据面与团队、Key、模型限制一起原子校验。
 
 ## team_member
 
-团队成员表记录团队负责人和普通成员。
+`platform_user` 保存全局用户资料。`team_member` 是用户与团队的唯一归属关系；一个用户最多属于一个团队，一个团队仅一位 `OWNER`。
 
 关键字段：
 
 - `organization_id`
 - `team_id`
+- `user_id`
 - `name`
 - `email`
 - `role`：`OWNER` 或 `MEMBER`
@@ -100,6 +110,8 @@ public record ApiKeyContext(
 - `created_at`
 
 `virtual_api_key.owner_member_id` 指向实际使用者，`created_by_member_id` 指向创建/发放者。MVP 暂不做登录和 RBAC 校验，但数据关系先落库，便于后续接入权限系统。
+
+控制台可直接选择负责人或开发成员用户切换上下文；该选择只控制筛选范围，不构成登录、认证或 RBAC。
 
 ## ai_request
 

@@ -34,7 +34,7 @@ auth:key:{keyHash}
   "teamId": 10,
   "applicationId": 20,
   "enabled": true,
-  "allowedModels": ["smart-chat"],
+  "allowedModels": ["gpt-4o"],
   "expireAt": 1783670400
 }
 ```

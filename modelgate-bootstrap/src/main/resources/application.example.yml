@@ -11,6 +11,10 @@ spring:
       database: ${MODELGATE_REDIS_DATABASE:0}
 
 modelgate:
+  provider:
+    master-key: ${MODELGATE_PROVIDER_MASTER_KEY}
+  mock:
+    default-delay-ms: ${MODELGATE_MOCK_DELAY_MS:80}
   rocketmq:
     enabled: ${MODELGATE_ROCKETMQ_ENABLED:true}
     endpoints: ${MODELGATE_ROCKETMQ_ENDPOINTS}

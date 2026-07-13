@@ -11,6 +11,7 @@ import com.modelgate.common.domain.RateLimitPolicy;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.infrastructure.db.AdminRepository;
+import com.modelgate.infrastructure.db.AdminControlRepository;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -31,14 +32,16 @@ public class VirtualKeyService {
     private static final Duration REDIS_TTL = Duration.ofMinutes(5);
 
     private final AdminRepository adminRepository;
+    private final AdminControlRepository adminControlRepository;
     private final StringRedisTemplate redisTemplate;
     private final Cache<String, ApiKeyContext> localCache = Caffeine.newBuilder()
             .maximumSize(20_000)
             .expireAfterWrite(Duration.ofMinutes(2))
             .build();
 
-    public VirtualKeyService(AdminRepository adminRepository, StringRedisTemplate redisTemplate) {
+    public VirtualKeyService(AdminRepository adminRepository, AdminControlRepository adminControlRepository, StringRedisTemplate redisTemplate) {
         this.adminRepository = adminRepository;
+        this.adminControlRepository = adminControlRepository;
         this.redisTemplate = redisTemplate;
     }
 
@@ -51,6 +54,10 @@ public class VirtualKeyService {
     }
 
     public CreateApiKeyResponse createForMember(long teamId, long memberId, CreateMemberApiKeyRequest request) {
+        if (!adminControlRepository.teamAllowsModels(teamId, request.allowedModels())) {
+            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST,
+                    "Every allowed model on an API key must be granted to the team first.");
+        }
         String apiKey = "mg-key-" + randomToken();
         String prefix = apiKey.substring(0, Math.min(apiKey.length(), 18));
         String hash = sha256(apiKey);

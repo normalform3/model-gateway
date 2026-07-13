@@ -18,7 +18,23 @@ public class RouteRepository {
     public Optional<RouteTarget> findFirstTarget(String logicalModel) {
         try {
             return Optional.ofNullable(jdbcTemplate.queryForObject("""
-                            SELECT d.id deployment_id, r.logical_model, p.name provider, d.actual_model
+                            SELECT pm.id deployment_id, pm.model_name, p.id provider_id, p.name provider_name, p.provider_type, p.base_url
+                            FROM provider_model pm JOIN provider p ON p.id = pm.provider_id
+                            WHERE pm.model_name = ? AND pm.enabled = 1 AND p.enabled = 1
+                            """,
+                    (rs, rowNum) -> new RouteTarget(
+                            rs.getLong("deployment_id"), rs.getString("model_name"), rs.getString("provider_name"),
+                            rs.getString("model_name"), rs.getLong("provider_id"), rs.getString("provider_type"), rs.getString("base_url")),
+                    logicalModel));
+        } catch (EmptyResultDataAccessException directMissing) {
+            return legacyTarget(logicalModel);
+        }
+    }
+
+    private Optional<RouteTarget> legacyTarget(String logicalModel) {
+        try {
+            return Optional.ofNullable(jdbcTemplate.queryForObject("""
+                            SELECT d.id deployment_id, r.logical_model, 'mock' provider, d.actual_model
                             FROM model_route r
                             JOIN route_target rt ON rt.route_id = r.id AND rt.enabled = 1
                             JOIN model_deployment d ON d.id = rt.deployment_id AND d.enabled = 1

@@ -46,6 +46,7 @@ public class ChatGatewayService {
     private final QuotaService quotaService;
     private final UsageEventPublisher usageEventPublisher;
     private final StringRedisTemplate redisTemplate;
+    private final OpenAiCompatibleProviderClient openAiCompatibleProviderClient;
 
     public ChatGatewayService(
             VirtualKeyService virtualKeyService,
@@ -55,7 +56,8 @@ public class ChatGatewayService {
             TokenEstimator tokenEstimator,
             QuotaService quotaService,
             UsageEventPublisher usageEventPublisher,
-            StringRedisTemplate redisTemplate
+            StringRedisTemplate redisTemplate,
+            OpenAiCompatibleProviderClient openAiCompatibleProviderClient
     ) {
         this.virtualKeyService = virtualKeyService;
         this.routeRepository = routeRepository;
@@ -65,6 +67,7 @@ public class ChatGatewayService {
         this.quotaService = quotaService;
         this.usageEventPublisher = usageEventPublisher;
         this.redisTemplate = redisTemplate;
+        this.openAiCompatibleProviderClient = openAiCompatibleProviderClient;
     }
 
     public Mono<ChatCompletionResponse> complete(String authorization, String idempotencyKey, ChatCompletionRequest request) {
@@ -75,8 +78,7 @@ public class ChatGatewayService {
                     ApiKeyContext apiKey = ctx.apiKey();
                     RouteTarget target = ctx.target();
                     QuotaReservation reservation = ctx.reservation();
-                    return providerRegistry.get(target.provider())
-                            .complete(new ProviderRequest(requestId, request.model(), target.actualModel(), request))
+                    return completeProvider(target, new ProviderRequest(requestId, request.model(), target.actualModel(), request))
                             .flatMap(response -> Mono.fromCallable(() -> {
                                 Usage usage = normalizedUsage(response, request, reservation);
                                 long durationMs = System.currentTimeMillis() - start;
@@ -107,8 +109,7 @@ public class ChatGatewayService {
                     ApiKeyContext apiKey = ctx.apiKey();
                     RouteTarget target = ctx.target();
                     QuotaReservation reservation = ctx.reservation();
-                    return providerRegistry.get(target.provider())
-                            .stream(new ProviderRequest(requestId, request.model(), target.actualModel(), request))
+                    return streamProvider(target, new ProviderRequest(requestId, request.model(), target.actualModel(), request))
                             .concatMap(chunk -> toSse(requestId, request, chunk, firstTokenMs, usageRef, content)
                                     .flatMap(event -> {
                                         if (!chunk.done()) {
@@ -134,6 +135,20 @@ public class ChatGatewayService {
             requestRepository.insertStarted(requestId, apiKey, request.model(), target, request.streamEnabled(), inputTokens, reservation.estimatedTokens());
             return new PreparedRequest(apiKey, target, reservation);
         }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private Mono<ProviderResponse> completeProvider(RouteTarget target, ProviderRequest request) {
+        if ("OPENAI_COMPATIBLE".equals(target.providerType())) {
+            return openAiCompatibleProviderClient.complete(target, request);
+        }
+        return providerRegistry.get("mock").complete(request);
+    }
+
+    private Flux<ProviderStreamChunk> streamProvider(RouteTarget target, ProviderRequest request) {
+        if ("OPENAI_COMPATIBLE".equals(target.providerType())) {
+            return openAiCompatibleProviderClient.stream(target, request);
+        }
+        return providerRegistry.get("mock").stream(request);
     }
 
     private Mono<ServerSentEvent<Object>> toSse(

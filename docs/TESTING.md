@@ -33,7 +33,7 @@ Mock Provider 应允许通过请求参数或测试配置控制行为，便于自
 
 - API Key 哈希和前缀生成。
 - ApiKeyContext 权限判断。
-- 逻辑模型路由选择。
+- 真实模型目录解析与 Provider 凭据选择。
 - Token 估算。
 - 错误码映射。
 - Provider 错误可重试分类。

@@ -1,6 +1,8 @@
 package com.modelgate.infrastructure.db;
 
 import com.modelgate.common.api.AdminDtos.BootstrapDemoResponse;
+import com.modelgate.common.api.AdminDtos.DemoIdentity;
+import com.modelgate.common.api.AdminDtos.DemoIdentityResponse;
 import com.modelgate.common.api.AdminDtos.CreateMemberApiKeyRequest;
 import com.modelgate.common.api.AdminDtos.CreateApiKeyRequest;
 import com.modelgate.common.api.AdminDtos.CreateTeamMemberRequest;
@@ -35,6 +37,11 @@ import java.util.Set;
 
 @Repository
 public class AdminRepository {
+    private static final String DEMO_ORGANIZATION_NAME = "Demo Organization";
+    private static final String DEMO_TEAM_NAME = "Demo Team";
+    private static final String DEMO_OWNER_EMAIL = "demo-owner@example.com";
+    private static final String DEMO_DEVELOPER_EMAIL = "demo-developer@example.com";
+
     private final JdbcTemplate jdbcTemplate;
 
     public AdminRepository(JdbcTemplate jdbcTemplate) {
@@ -44,29 +51,47 @@ public class AdminRepository {
     public BootstrapDemoResponse bootstrapDemo() {
         OffsetDateTime now = OffsetDateTime.now();
         jdbcTemplate.update("INSERT IGNORE INTO organization(name, created_at) VALUES (?, ?)",
-                "Demo Organization", JdbcTime.toTimestamp(now));
-        long orgId = requireId("SELECT id FROM organization WHERE name = ?", "Demo Organization");
+                DEMO_ORGANIZATION_NAME, JdbcTime.toTimestamp(now));
+        long orgId = requireId("SELECT id FROM organization WHERE name = ?", DEMO_ORGANIZATION_NAME);
 
         jdbcTemplate.update("""
                         INSERT IGNORE INTO team(organization_id, name, key_rpm, team_rpm, team_concurrency, model_concurrency, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                orgId, "Demo Team", 60, 600, 20, 50, JdbcTime.toTimestamp(now));
-        long teamId = requireId("SELECT id FROM team WHERE organization_id = ? AND name = ?", orgId, "Demo Team");
+                orgId, DEMO_TEAM_NAME, 60, 600, 20, 50, JdbcTime.toTimestamp(now));
+        long teamId = requireId("SELECT id FROM team WHERE organization_id = ? AND name = ?", orgId, DEMO_TEAM_NAME);
 
         jdbcTemplate.update("""
-                        INSERT IGNORE INTO team_member(organization_id, team_id, name, email, role, enabled, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT IGNORE INTO platform_user(name, email, enabled, created_at, updated_at)
+                        VALUES (?, ?, 1, ?, ?)
+                        """, "Demo Owner", DEMO_OWNER_EMAIL, JdbcTime.toTimestamp(now), JdbcTime.toTimestamp(now));
+        jdbcTemplate.update("""
+                        INSERT IGNORE INTO platform_user(name, email, enabled, created_at, updated_at)
+                        VALUES (?, ?, 1, ?, ?)
+                        """, "Demo Developer", DEMO_DEVELOPER_EMAIL, JdbcTime.toTimestamp(now), JdbcTime.toTimestamp(now));
+        long ownerUserId = requireId("SELECT id FROM platform_user WHERE email = ?", DEMO_OWNER_EMAIL);
+        long developerUserId = requireId("SELECT id FROM platform_user WHERE email = ?", DEMO_DEVELOPER_EMAIL);
+
+        jdbcTemplate.update("""
+                        INSERT IGNORE INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                orgId, teamId, "Demo Owner", "demo-owner@example.com", "OWNER", 1, JdbcTime.toTimestamp(now));
+                orgId, teamId, ownerUserId, "Demo Owner", DEMO_OWNER_EMAIL, "OWNER", 1, JdbcTime.toTimestamp(now));
+
+        jdbcTemplate.update("""
+                        INSERT IGNORE INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                orgId, teamId, developerUserId, "Demo Developer", DEMO_DEVELOPER_EMAIL, "MEMBER", 1, JdbcTime.toTimestamp(now));
+        jdbcTemplate.update("UPDATE team SET owner_user_id = ? WHERE id = ?", ownerUserId, teamId);
 
         jdbcTemplate.update("INSERT IGNORE INTO application(organization_id, team_id, name, created_at) VALUES (?, ?, ?, ?)",
                 orgId, teamId, "CodeReader Demo", JdbcTime.toTimestamp(now));
         long appId = requireId("SELECT id FROM application WHERE team_id = ? AND name = ?", teamId, "CodeReader Demo");
 
         jdbcTemplate.update("INSERT IGNORE INTO provider(name, provider_type, enabled, created_at) VALUES (?, ?, ?, ?)",
-                "mock", "MOCK", 1, JdbcTime.toTimestamp(now));
-        long providerId = requireId("SELECT id FROM provider WHERE name = ?", "mock");
+                "Mock ChatGPT API", "MOCK_OPENAI", 1, JdbcTime.toTimestamp(now));
+        long providerId = requireId("SELECT id FROM provider WHERE name = ?", "Mock ChatGPT API");
 
         jdbcTemplate.update("INSERT IGNORE INTO model(logical_model, created_at) VALUES (?, ?)",
                 "smart-chat", JdbcTime.toTimestamp(now));
@@ -75,13 +100,23 @@ public class AdminRepository {
                         INSERT IGNORE INTO model_deployment(provider_id, name, actual_model, enabled, created_at)
                         VALUES (?, ?, ?, ?, ?)
                         """,
-                providerId, "mock-chat-deployment", "mock-chat", 1, JdbcTime.toTimestamp(now));
+                providerId, "mock-gpt-4o-mini", "gpt-4o-mini", 1, JdbcTime.toTimestamp(now));
         long deploymentId = requireId("SELECT id FROM model_deployment WHERE provider_id = ? AND name = ?",
-                providerId, "mock-chat-deployment");
+                providerId, "mock-gpt-4o-mini");
+
+        jdbcTemplate.update("""
+                        INSERT IGNORE INTO provider_model(provider_id, model_name, enabled, input_price_per_million, output_price_per_million, currency, created_at, updated_at)
+                        VALUES (?, ?, 1, 0, 0, 'USD', ?, ?)
+                        """, providerId, "mock-gpt-4o-mini", JdbcTime.toTimestamp(now), JdbcTime.toTimestamp(now));
 
         jdbcTemplate.update("INSERT IGNORE INTO model_route(logical_model, strategy, enabled, created_at) VALUES (?, ?, ?, ?)",
                 "smart-chat", "FIXED", 1, JdbcTime.toTimestamp(now));
         long routeId = requireId("SELECT id FROM model_route WHERE logical_model = ?", "smart-chat");
+
+        jdbcTemplate.update("INSERT IGNORE INTO team_model_access(team_id, logical_model, created_at) VALUES (?, ?, ?)",
+                teamId, "smart-chat", JdbcTime.toTimestamp(now));
+        jdbcTemplate.update("INSERT IGNORE INTO team_direct_model_access(team_id, model_name, created_at) VALUES (?, ?, ?)",
+                teamId, "mock-gpt-4o-mini", JdbcTime.toTimestamp(now));
 
         jdbcTemplate.update("INSERT IGNORE INTO route_target(route_id, deployment_id, weight, enabled, created_at) VALUES (?, ?, ?, ?, ?)",
                 routeId, deploymentId, 100, 1, JdbcTime.toTimestamp(now));
@@ -93,7 +128,39 @@ public class AdminRepository {
                 "TEAM", teamId, 500_000L, 0L, 0L, 0L, JdbcTime.toTimestamp(now));
         long quotaAccountId = requireId("SELECT id FROM quota_account WHERE account_type = ? AND owner_id = ?", "TEAM", teamId);
 
-        return new BootstrapDemoResponse(orgId, teamId, appId, quotaAccountId, "smart-chat");
+        return new BootstrapDemoResponse(orgId, teamId, appId, quotaAccountId, "mock-gpt-4o-mini");
+    }
+
+    public DemoIdentityResponse demoIdentities() {
+        List<DemoMember> members = jdbcTemplate.query("""
+                        SELECT t.id AS team_id, t.name AS team_name,
+                               m.id AS member_id, m.name AS member_name, m.email, m.role
+                        FROM organization o
+                        JOIN team t ON t.organization_id = o.id
+                        JOIN team_member m ON m.team_id = t.id
+                        WHERE o.name = ? AND t.name = ? AND m.email IN (?, ?)
+                        ORDER BY m.id ASC
+                        """,
+                (rs, rowNum) -> new DemoMember(
+                        rs.getLong("team_id"),
+                        rs.getString("team_name"),
+                        rs.getLong("member_id"),
+                        rs.getString("member_name"),
+                        rs.getString("email"),
+                        rs.getString("role")),
+                DEMO_ORGANIZATION_NAME, DEMO_TEAM_NAME, DEMO_OWNER_EMAIL, DEMO_DEVELOPER_EMAIL);
+
+        DemoMember owner = members.stream().filter(member -> DEMO_OWNER_EMAIL.equals(member.email())).findFirst().orElse(null);
+        DemoMember developer = members.stream().filter(member -> DEMO_DEVELOPER_EMAIL.equals(member.email())).findFirst().orElse(null);
+        if (owner == null || developer == null) {
+            return new DemoIdentityResponse(false, List.of());
+        }
+
+        return new DemoIdentityResponse(true, List.of(
+                new DemoIdentity("platform-admin", "Demo Platform Admin", "platform-admin", null, null, null),
+                new DemoIdentity("demo-team-owner", owner.name(), "team-admin", owner.teamId(), owner.teamName(), owner.memberId()),
+                new DemoIdentity("demo-developer", developer.name(), "developer", developer.teamId(), developer.teamName(), developer.memberId())
+        ));
     }
 
     public long insertApiKey(CreateApiKeyRequest request, String keyPrefix, String keyHash) {
@@ -174,6 +241,12 @@ public class AdminRepository {
                     "Default Application",
                     JdbcTime.toTimestamp(now));
 
+            long ownerUserId = GeneratedKeys.insert(jdbcTemplate, """
+                            INSERT INTO platform_user(name, email, enabled, created_at, updated_at)
+                            VALUES (?, ?, 1, ?, ?)
+                            """,
+                    request.ownerName(), request.ownerEmail().trim().toLowerCase(), JdbcTime.toTimestamp(now), JdbcTime.toTimestamp(now));
+
             GeneratedKeys.insert(jdbcTemplate, """
                             INSERT INTO team_member(organization_id, team_id, name, email, role, enabled, created_at)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -185,6 +258,8 @@ public class AdminRepository {
                     "OWNER",
                     1,
                     JdbcTime.toTimestamp(now));
+            jdbcTemplate.update("UPDATE team_member SET user_id = ? WHERE team_id = ? AND email = ?", ownerUserId, teamId, request.ownerEmail().trim().toLowerCase());
+            jdbcTemplate.update("UPDATE team SET owner_user_id = ? WHERE id = ?", ownerUserId, teamId);
 
             jdbcTemplate.update("""
                             INSERT INTO quota_account(account_type, owner_id, available_tokens, frozen_tokens, consumed_tokens, version, updated_at)
@@ -204,10 +279,18 @@ public class AdminRepository {
         }
     }
 
-    public TeamListResponse listTeams() {
-        List<TeamSummary> items = jdbcTemplate.query(teamSummarySql(""),
-                (rs, rowNum) -> mapTeamSummary(rs));
-        return new TeamListResponse(items);
+    public TeamListResponse listTeams(String keyword, Boolean enabled, String logicalModel, Long ownerUserId, int page, int size) {
+        StringBuilder where = new StringBuilder("WHERE 1 = 1");
+        List<Object> args = new java.util.ArrayList<>();
+        if (keyword != null && !keyword.isBlank()) { where.append(" AND t.name LIKE ?"); args.add("%" + keyword.trim() + "%"); }
+        if (enabled != null) { where.append(" AND t.enabled = ?"); args.add(enabled ? 1 : 0); }
+        if (logicalModel != null && !logicalModel.isBlank()) { where.append(" AND EXISTS (SELECT 1 FROM team_direct_model_access ma WHERE ma.team_id = t.id AND ma.model_name = ?)"); args.add(logicalModel); }
+        if (ownerUserId != null) { where.append(" AND t.owner_user_id = ?"); args.add(ownerUserId); }
+        Long total = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM team t " + where, Long.class, args.toArray());
+        List<Object> pageArgs = new java.util.ArrayList<>(args); pageArgs.add(size); pageArgs.add(page * size);
+        List<TeamSummary> items = jdbcTemplate.query(teamSummarySql(where.toString()) + " LIMIT ? OFFSET ?",
+                (rs, rowNum) -> mapTeamSummary(rs), pageArgs.toArray());
+        return new TeamListResponse(items, page, size, total == null ? 0L : total);
     }
 
     public Optional<TeamSummary> findTeamSummary(long teamId) {
@@ -257,14 +340,19 @@ public class AdminRepository {
     public TeamMemberItem createTeamMember(long teamId, CreateTeamMemberRequest request) {
         long organizationId = findTeamOrganizationId(teamId);
         try {
+            long userId = GeneratedKeys.insert(jdbcTemplate, """
+                            INSERT INTO platform_user(name, email, enabled, created_at, updated_at)
+                            VALUES (?, ?, 1, ?, ?)
+                            """, request.name(), request.email().trim().toLowerCase(), JdbcTime.toTimestamp(OffsetDateTime.now()), JdbcTime.toTimestamp(OffsetDateTime.now()));
             long memberId = GeneratedKeys.insert(jdbcTemplate, """
-                            INSERT INTO team_member(organization_id, team_id, name, email, role, enabled, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            INSERT INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                     organizationId,
                     teamId,
+                    userId,
                     request.name(),
-                    request.email(),
+                    request.email().trim().toLowerCase(),
                     "MEMBER",
                     1,
                     JdbcTime.toTimestamp(OffsetDateTime.now()));
@@ -397,6 +485,7 @@ public class AdminRepository {
                     t.team_rpm,
                     t.team_concurrency,
                     t.model_concurrency,
+                    t.owner_user_id,
                     (SELECT m.id FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' ORDER BY m.id ASC LIMIT 1) owner_member_id,
                     (SELECT m.name FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' ORDER BY m.id ASC LIMIT 1) owner_name,
                     (SELECT m.email FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' ORDER BY m.id ASC LIMIT 1) owner_email,
@@ -556,5 +645,8 @@ public class AdminRepository {
     }
 
     private record MemberKeyScope(long organizationId, long teamId, long applicationId) {
+    }
+
+    private record DemoMember(long teamId, String teamName, long memberId, String name, String email, String role) {
     }
 }

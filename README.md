@@ -27,7 +27,7 @@ CodeReader Agent ─┐
 ```text
 创建虚拟 Key
   -> 配置团队额度
-  -> 使用 Key 调用逻辑模型
+  -> 使用 Key 调用真实模型名
   -> Redis 完成限流和额度预占
   -> 网关流式转发模型响应
   -> RocketMQ 异步发送 Usage Event
@@ -35,12 +35,9 @@ CodeReader Agent ─┐
   -> 控制面查看调用记录和剩余额度
 ```
 
-MVP 完整目标接入：
+MVP 支持 `MOCK_OPENAI` 与 `OPENAI_COMPATIBLE` Provider。客户端直接传递全局唯一的真实模型名；Provider 的多把 API Key 使用 AES-GCM 加密保存，并由网关轮询选择，在首次响应前对可重试故障切换一次备用凭据。
 
-- 一个 OpenAI-Compatible Provider
-- 一个 Mock Provider
-
-当前第一版最小闭环先实现 Mock Provider，OpenAI-Compatible Provider 放在下一小步，避免一开始被外部模型配置和费用拖慢。
+Mock Provider 仍可在控制台配置，用于本地验证与故障演练；真实 Provider 的 Base URL 和 API Key 均不得出现在仓库或日志中。
 
 Claude、通义、DeepSeek、本地 vLLM、熔断降级、事务消息、日终对账和管理控制台增强能力放入后续阶段。
 

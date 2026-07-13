@@ -3,7 +3,7 @@
 ## 原则
 
 - MVP 对外优先提供 OpenAI 风格接口，降低业务应用接入成本。
-- 业务应用使用逻辑模型名，不直接指定真实 Provider 模型。
+- 业务应用使用控制台登记的真实模型名，例如 `gpt-4o`；同名模型全局唯一。
 - 所有需要鉴权的接口使用 `Authorization: Bearer mg-key-example` 形式的虚拟 Key。
 - 示例中的 Key、URL、ID 均为占位符，不代表真实凭据或真实租户。
 - 错误响应必须可诊断，但不得暴露真实 Provider 密钥、私有端点或内部堆栈。
@@ -21,7 +21,7 @@ Content-Type: application/json
 
 ```json
 {
-  "model": "smart-chat",
+  "model": "gpt-4o",
   "messages": [
     {
       "role": "user",
@@ -35,10 +35,12 @@ Content-Type: application/json
 
 说明：
 
-- `model` 是逻辑模型，例如 `smart-chat`。
+- `model` 是真实模型名，例如 `gpt-4o`。
 - `stream=true` 时返回 SSE。
 - `max_tokens` 缺失时，网关使用平台默认上限估算预占额度。
 - `Idempotency-Key` 用于防止客户端重试造成重复记录或重复扣费。
+
+当前开发期还支持仅供 Mock Provider 使用的 `mock` 字段，例如 `{"mode":"normal","inputTokens":120,"outputTokens":45}`。它控制本地模拟的 Provider 用量返回；不会改变路由，也不会访问外部 API。
 
 普通响应遵循 OpenAI 风格：
 
@@ -47,7 +49,7 @@ Content-Type: application/json
   "id": "chatcmpl-example",
   "object": "chat.completion",
   "created": 1783670400,
-  "model": "smart-chat",
+  "model": "gpt-4o",
   "choices": [
     {
       "index": 0,
@@ -79,6 +81,29 @@ data: [DONE]
 ## 虚拟 API Key 管理
 
 MVP 控制面接口可以先面向内部管理后台，不要求完全公开。
+
+### 管理员控制面增量
+
+- `GET/POST/PATCH/DELETE /admin/providers` 管理 `MOCK_OPENAI` 与 `OPENAI_COMPATIBLE` Provider；真实 Provider 的 Base URL 使用占位或环境配置，禁止记录私有地址。
+- `GET/POST /admin/providers/{providerId}/credentials`、`PATCH /admin/provider-credentials/{credentialId}`、`POST /admin/provider-credentials/{credentialId}/disable` 管理加密凭据池；明文仅在提交时使用，响应不返回明文。
+- `GET/POST/PATCH/DELETE /admin/models` 管理全局唯一的真实模型名和计费单价。
+- `GET/PUT /admin/teams/{teamId}/model-access` 配置团队可使用的真实模型名。启用 Key 正在使用的模型不能直接撤销授权。
+- `GET /admin/api-keys` 仅返回 Key 前缀、归属、模型范围和状态；创建必须调用成员路径，明文只出现在创建响应一次。
+- `GET /admin/dashboard/overview` 与 `PATCH /admin/dashboard/runtime-policy` 提供平台概览及全局 RPM/并发保护配置。
+
+列表接口统一支持 `page`（从 0 开始）和 `size`（最大 100），响应返回 `items`、`page`、`size`、`total`。额外筛选条件：
+
+- Provider：`keyword`、`providerType`（当前固定为 `MOCK_OPENAI`）、`enabled`。
+- 团队：`keyword`、`enabled`、`logicalModel`。
+- 虚拟 Key：`keyword`、`teamId`、`applicationId`、`memberId`、`enabled`、`expiry`（`ACTIVE` 或 `EXPIRED`）。
+
+### 用户与开发期视角
+
+`POST /admin/bootstrap/demo` 会幂等创建 Demo Team、`Demo Owner` 和 `Demo Developer`，不创建密码、会话或预置明文 API Key。
+
+`GET/POST /admin/users`、`PATCH/DELETE /admin/users/{userId}` 管理全局用户；`PUT /admin/users/{userId}/team-membership` 为用户分配唯一团队及 `OWNER`/`MEMBER` 角色。将用户设为 `OWNER` 会原子降级原负责人。
+
+控制台可按角色选择用户：负责人仅请求其所属团队，开发成员仅查看自己的 Key。该选择只影响导航和默认筛选，**不构成登录、鉴权或 RBAC**。
 
 ## 团队和成员管理
 
@@ -144,7 +169,7 @@ Content-Type: application/json
 {
   "applicationId": 100,
   "name": "developer-one-dev-key",
-  "allowedModels": ["smart-chat"],
+  "allowedModels": ["gpt-4o"],
   "expiresAt": "2026-12-31T23:59:59+08:00",
   "createdByMemberId": 10
 }
@@ -165,7 +190,7 @@ Content-Type: application/json
   "teamId": 10,
   "applicationId": 100,
   "name": "codereader-dev",
-  "allowedModels": ["smart-chat"],
+  "allowedModels": ["gpt-4o"],
   "expiresAt": "2026-12-31T23:59:59+08:00"
 }
 ```
@@ -221,9 +246,9 @@ GET /admin/applications/{applicationId}/requests?from=2026-07-01&to=2026-07-10
       "requestId": "req-example-001",
       "memberId": 11,
       "memberName": "Developer One",
-      "requestedModel": "smart-chat",
+      "requestedModel": "gpt-4o",
       "actualProvider": "mock",
-      "actualModel": "mock-chat",
+      "actualModel": "gpt-4o-mini",
       "status": "SUCCESS",
       "inputTokens": 100,
       "outputTokens": 50,
@@ -276,7 +301,7 @@ MVP 错误码：
 | `INVALID_API_KEY` | 401 | false | 虚拟 Key 不存在或格式错误 |
 | `API_KEY_DISABLED` | 403 | false | 虚拟 Key 已禁用 |
 | `API_KEY_EXPIRED` | 403 | false | 虚拟 Key 已过期 |
-| `MODEL_NOT_ALLOWED` | 403 | false | Key 无权访问逻辑模型 |
+| `MODEL_NOT_ALLOWED` | 403 | false | Key 无权访问真实模型 |
 | `RATE_LIMIT_EXCEEDED` | 429 | true | RPM 或 TPM 超限 |
 | `CONCURRENCY_LIMIT_EXCEEDED` | 429 | true | 并发超限 |
 | `QUOTA_INSUFFICIENT` | 402 | false | 可用额度不足 |
