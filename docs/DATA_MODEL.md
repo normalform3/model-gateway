@@ -11,17 +11,7 @@ Organization 企业
                 └── Virtual API Key 虚拟密钥
 ```
 
-每一层都可以配置：
-
-- 预算
-- RPM
-- TPM
-- 最大并发数
-- 可访问模型
-- 有效期
-- 告警阈值
-
-多级限制最终取最严格值。
+授权链固定为：平台管理员向团队发放模型权限和公共 Token，团队负责人再向成员划拨 Token 与模型权限，系统据此签发成员 Key。团队负责人为空时团队为 `DRAFT`，不得接收授权。
 
 ## 核心表分组
 
@@ -33,6 +23,9 @@ Organization 企业
 - `team_member`
 - `application`
 - `virtual_api_key`
+- `team_entitlement_request`
+- `team_model_grant`
+- `member_model_access`
 
 模型管理：
 
@@ -46,6 +39,7 @@ Organization 企业
 - `budget`
 - `quota_account`
 - `quota_transaction`
+- `quota_transfer`
 
 请求和计费：
 
@@ -83,15 +77,16 @@ public record ApiKeyContext(
 - 页面展示只允许使用 Key 前缀。
 - 明文虚拟 Key 只在创建时返回一次。
 - 真实 Provider 凭据不暴露给业务应用。
-- 成员级计量依赖独立虚拟 Key：团队负责人申领和管理 Key，但分配给每个成员的 Key 必须绑定 `owner_member_id`，不能用共享 Key 伪造按人统计。
-- 一个成员可以在同一应用下拥有多个 Key，用于环境隔离和轮换；首轮不支持无成员归属的共享 Key。
+- 成员级计量依赖系统签发的独立虚拟 Key。Key 必须绑定 `owner_member_id` 和 `application_id`，不能用共享 Key 伪造按人统计。
+- 负责人不生成 Key，只完成成员模型权限与额度划拨；成员首次在应用下获得有效访问权限时系统生成 Key。模型权限不再存为 Key 的事实来源。
 
 ## Provider、直接模型与团队授权
 
 - `provider` 类型为 `MOCK_OPENAI` 或 `OPENAI_COMPATIBLE`；后者保存公开协议的 Base URL。
 - `provider_credential` 一条记录代表一把 Provider API Key，仅保存 AES-GCM 密文、版本、末四位和状态；一个 Provider 可有多条启用凭据。
 - `provider_model.model_name` 是全局唯一的真实模型名，包含输入/输出每百万 Token 单价和币种。
-- `team_direct_model_access` 记录团队可使用的真实模型名。虚拟 Key 的 `allowed_models` 必须是该集合的子集。
+- `team_model_grant` 记录管理员批准的团队模型及有效期；`team_direct_model_access` 保留为模型目录兼容索引。
+- `member_model_access` 是负责人发放给成员的模型集合。网关有效权限为团队有效授权和成员授权的交集。
 - `global_runtime_policy` 保存全局 RPM 和并发阈值，数据面与团队、Key、模型限制一起原子校验。
 
 ## team_member
@@ -109,7 +104,7 @@ public record ApiKeyContext(
 - `enabled`
 - `created_at`
 
-`virtual_api_key.owner_member_id` 指向实际使用者，`created_by_member_id` 指向创建/发放者。MVP 暂不做登录和 RBAC 校验，但数据关系先落库，便于后续接入权限系统。
+`virtual_api_key.owner_member_id` 指向实际使用者。MVP 暂不做登录和 RBAC 校验，但负责人上下文仍必须与团队所有者关系匹配，便于后续接入权限系统。
 
 控制台可直接选择负责人或开发成员用户切换上下文；该选择只控制筛选范围，不构成登录、认证或 RBAC。
 
@@ -188,6 +183,13 @@ CREATE TABLE ai_request (
 - `version`
 - `updated_at`
 
+账户类型：
+
+- `TEAM`：管理员已充值、尚未由负责人划拨给成员的公共 Token 池；不直接用于模型调用。
+- `MEMBER`：个人 Token 账户；网关预占、结算和释放的唯一运行时账户。
+
+`quota_transfer` 记录一次负责人划拨的来源团队账户、目标成员账户、额度和原因。调用费用只在成员账户消费一次；团队账单由成员明细聚合，不会重复扣除公共池。
+
 ## quota_transaction
 
 额度流水是账本核心，不能只维护余额。
@@ -211,7 +213,8 @@ CREATE TABLE quota_transaction (
 
 交易类型：
 
-- `GRANT`：发放
+- `TEAM_GRANT`：管理员向团队公共池发放
+- `MEMBER_ALLOCATION`：负责人向成员划拨
 - `FREEZE`：冻结
 - `CONSUME`：消费
 - `RELEASE`：解冻

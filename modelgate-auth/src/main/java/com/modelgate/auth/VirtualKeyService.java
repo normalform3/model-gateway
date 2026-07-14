@@ -65,6 +65,35 @@ public class VirtualKeyService {
         return new CreateApiKeyResponse(keyId, prefix, apiKey, true);
     }
 
+    /** The control plane supplies access; this service alone creates the secret material. */
+    public CreateApiKeyResponse provisionSystemMemberKey(long teamId, long memberId, long applicationId) {
+        Optional<Long> existing = adminRepository.findActiveMemberKeyId(teamId, memberId, applicationId);
+        if (existing.isPresent()) {
+            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST,
+                    "A system-provisioned active key already exists for this member and application. Rotate it instead.");
+        }
+        String apiKey = "mg-key-" + randomToken();
+        String prefix = apiKey.substring(0, Math.min(apiKey.length(), 18));
+        long keyId = adminRepository.insertSystemMemberApiKey(teamId, memberId, applicationId, prefix, sha256(apiKey));
+        return new CreateApiKeyResponse(keyId, prefix, apiKey, true);
+    }
+
+    public void invalidateMember(long memberId) {
+        invalidateHashes(adminRepository.findKeyHashesByMember(memberId));
+    }
+
+    public void invalidateKeyHashes(Iterable<String> hashes) {
+        invalidateHashes(hashes);
+    }
+
+    public void invalidateTeam(long teamId) {
+        invalidateHashes(adminRepository.findKeyHashesByTeam(teamId));
+    }
+
+    public void invalidateQuotaAccount(long accountId) {
+        try { redisTemplate.delete("quota:account:" + accountId); } catch (RuntimeException ignored) { }
+    }
+
     public void disable(long keyId) {
         if (!adminRepository.disableApiKey(keyId)) {
             throw new ModelGateException(ErrorCode.INVALID_API_KEY, "API key was not found.");
@@ -156,6 +185,13 @@ public class VirtualKeyService {
 
     private String redisKey(String hash) {
         return "auth:key:" + hash;
+    }
+
+    private void invalidateHashes(Iterable<String> hashes) {
+        for (String hash : hashes) {
+            localCache.invalidate(hash);
+            try { redisTemplate.delete(redisKey(hash)); } catch (RuntimeException ignored) { }
+        }
     }
 
     private String encode(ApiKeyContext context) {

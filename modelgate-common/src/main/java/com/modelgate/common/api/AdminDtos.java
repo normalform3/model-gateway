@@ -83,9 +83,11 @@ public final class AdminDtos {
             Integer teamRpm,
             Integer teamConcurrency,
             Integer modelConcurrency,
-            @NotBlank String ownerName,
-            @NotBlank String ownerEmail
+            Long ownerUserId
     ) {
+    }
+
+    public record SetTeamOwnerRequest(Long ownerUserId) {
     }
 
     public record UpdateTeamRequest(
@@ -103,6 +105,7 @@ public final class AdminDtos {
             long organizationId,
             long defaultApplicationId,
             String name,
+            String status,
             boolean enabled,
             int keyRpm,
             int teamRpm,
@@ -123,6 +126,9 @@ public final class AdminDtos {
             @NotBlank String name,
             @NotBlank String email
     ) {
+    }
+
+    public record AddExistingTeamMemberRequest(@NotNull Long ownerMemberId, @NotNull Long userId) {
     }
 
     public record UpdateTeamMemberRequest(
@@ -166,6 +172,24 @@ public final class AdminDtos {
             long frozenTokens,
             long consumedTokens,
             OffsetDateTime updatedAt
+    ) {
+    }
+
+    public record MemberQuotaResponse(
+            long memberId,
+            long availableTokens,
+            long frozenTokens,
+            long consumedTokens,
+            OffsetDateTime updatedAt
+    ) {
+    }
+
+    public record BillingSummary(
+            long scopeId,
+            long totalTokens,
+            BigDecimal totalAmount,
+            String currency,
+            long recordCount
     ) {
     }
 
@@ -302,6 +326,62 @@ public final class AdminDtos {
     }
 
     public record UpdateTeamModelAccessRequest(List<String> logicalModels) {
+    }
+
+    public record CreateTeamEntitlementRequest(
+            @NotNull Long ownerMemberId,
+            List<String> modelNames,
+            @NotNull Long requestedTokens,
+            @NotBlank String purpose,
+            OffsetDateTime expiresAt
+    ) {
+    }
+
+    public record ReviewTeamEntitlementRequest(@NotBlank String decision, String reviewerNote) {
+    }
+
+    public record TeamEntitlementItem(
+            long requestId,
+            long teamId,
+            long ownerMemberId,
+            List<String> modelNames,
+            long requestedTokens,
+            String purpose,
+            OffsetDateTime expiresAt,
+            String status,
+            String reviewerNote,
+            OffsetDateTime createdAt,
+            OffsetDateTime reviewedAt
+    ) {
+    }
+
+    public record TeamEntitlementListResponse(List<TeamEntitlementItem> items) {
+    }
+
+    public record GrantMemberAccessRequest(
+            @NotNull Long ownerMemberId,
+            @NotNull Long applicationId,
+            List<String> modelNames,
+            @NotNull Long tokenAllocation,
+            String reason
+    ) {
+    }
+
+    public record MemberAccessResponse(
+            long memberId,
+            long quotaAccountId,
+            long availableTokens,
+            List<String> modelNames,
+            Long keyId,
+            String keyPrefix,
+            String apiKey
+    ) {
+    }
+
+    public record RevokeMemberModelAccessRequest(@NotNull Long ownerMemberId) {
+    }
+
+    public record RotateMemberKeyRequest(@NotNull Long ownerMemberId) {
     }
 
     public record VirtualApiKeyItem(

@@ -77,8 +77,8 @@ onMounted(loadUsers);
       <AdminDashboardPage v-if="page === 'dashboard'" />
       <UsersPage v-else-if="page === 'users'" />
       <ProviderPage v-else-if="page === 'providers'" />
-      <TeamsPage v-else-if="page === 'teams'" :owner-user-id="roleView === 'team-admin' ? selectedUserId : null" :admin-mode="roleView === 'platform-admin'" />
-      <ApiKeysPage v-else :default-team-id="currentUser?.teamId" :default-member-id="roleView === 'developer' ? currentUser?.memberId : null" />
+      <TeamsPage v-else-if="page === 'teams'" :owner-user-id="roleView === 'team-admin' ? selectedUserId : null" :owner-member-id="roleView === 'team-admin' ? currentUser?.memberId : null" :admin-mode="roleView === 'platform-admin'" />
+      <ApiKeysPage v-else :default-team-id="currentUser?.teamId" :default-member-id="roleView === 'developer' ? currentUser?.memberId : null" :owner-member-id="roleView === 'team-admin' ? currentUser?.memberId : null" />
     </section>
   </main>
 </template>

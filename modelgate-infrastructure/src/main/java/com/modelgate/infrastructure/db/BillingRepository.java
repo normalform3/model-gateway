@@ -1,6 +1,7 @@
 package com.modelgate.infrastructure.db;
 
 import com.modelgate.common.event.UsageReportedEvent;
+import com.modelgate.common.api.AdminDtos.BillingSummary;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -83,9 +84,9 @@ public class BillingRepository {
 
     public void insertQuotaConsumeTransaction(UsageReportedEvent event) {
         Long accountId = jdbcTemplate.queryForObject(
-                "SELECT id FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?",
+                "SELECT id FROM quota_account WHERE account_type = 'MEMBER' AND owner_id = ?",
                 Long.class,
-                event.teamId());
+                event.memberId());
         Long balanceAfter = jdbcTemplate.queryForObject(
                 "SELECT available_tokens FROM quota_account WHERE id = ?",
                 Long.class,
@@ -103,6 +104,26 @@ public class BillingRepository {
                 balanceAfter == null ? 0L : balanceAfter,
                 event.eventId(),
                 JdbcTime.toTimestamp(OffsetDateTime.now()));
+    }
+
+    public BillingSummary teamSummary(long teamId) {
+        return summary("team_id", teamId);
+    }
+
+    public BillingSummary memberSummary(long memberId) {
+        return summary("member_id", memberId);
+    }
+
+    private BillingSummary summary(String column, long scopeId) {
+        String sql = """
+                SELECT COALESCE(SUM(input_tokens + output_tokens), 0) total_tokens,
+                       COALESCE(SUM(amount), 0) total_amount,
+                       COALESCE(MAX(currency), 'USD') currency,
+                       COUNT(*) record_count
+                FROM billing_record
+                """ + " WHERE " + column + " = ?";
+        return jdbcTemplate.queryForObject(sql, (rs, row) -> new BillingSummary(scopeId,
+                rs.getLong("total_tokens"), rs.getBigDecimal("total_amount"), rs.getString("currency"), rs.getLong("record_count")), scopeId);
     }
 
     private Pricing findPricing(String provider, String model) {

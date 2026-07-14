@@ -24,6 +24,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -215,6 +216,35 @@ public class AdminRepository {
                 JdbcTime.toTimestamp(OffsetDateTime.now()));
     }
 
+    public long insertSystemMemberApiKey(long teamId, long ownerMemberId, long applicationId, String keyPrefix, String keyHash) {
+        MemberKeyScope scope = findMemberKeyScope(teamId, ownerMemberId, applicationId);
+        return GeneratedKeys.insert(jdbcTemplate, """
+                INSERT INTO virtual_api_key(
+                    organization_id, team_id, application_id, owner_member_id,
+                    name, key_prefix, key_hash, allowed_models, enabled, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '', 1, ?)
+                """, scope.organizationId(), scope.teamId(), scope.applicationId(), ownerMemberId,
+                "member-" + ownerMemberId + "-app-" + applicationId, keyPrefix, keyHash, JdbcTime.toTimestamp(OffsetDateTime.now()));
+    }
+
+    public Optional<Long> findActiveMemberKeyId(long teamId, long memberId, long applicationId) {
+        try {
+            return Optional.ofNullable(jdbcTemplate.queryForObject("""
+                    SELECT id FROM virtual_api_key WHERE team_id = ? AND owner_member_id = ? AND application_id = ? AND enabled = 1
+                    ORDER BY id DESC LIMIT 1
+                    """, Long.class, teamId, memberId, applicationId));
+        } catch (EmptyResultDataAccessException ex) { return Optional.empty(); }
+    }
+
+    public List<String> findKeyHashesByTeam(long teamId) {
+        return jdbcTemplate.queryForList("SELECT key_hash FROM virtual_api_key WHERE team_id = ?", String.class, teamId);
+    }
+
+    public List<String> findKeyHashesByMember(long memberId) {
+        return jdbcTemplate.queryForList("SELECT key_hash FROM virtual_api_key WHERE owner_member_id = ?", String.class, memberId);
+    }
+
+    @Transactional
     public TeamSummary createTeam(CreateTeamRequest request) {
         OffsetDateTime now = OffsetDateTime.now();
         try {
@@ -231,51 +261,58 @@ public class AdminRepository {
                     defaultInt(request.modelConcurrency(), 50),
                     1,
                     JdbcTime.toTimestamp(now));
-
-            GeneratedKeys.insert(jdbcTemplate, """
-                            INSERT INTO application(organization_id, team_id, name, created_at)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                    request.organizationId(),
-                    teamId,
-                    "Default Application",
-                    JdbcTime.toTimestamp(now));
-
-            long ownerUserId = GeneratedKeys.insert(jdbcTemplate, """
-                            INSERT INTO platform_user(name, email, enabled, created_at, updated_at)
-                            VALUES (?, ?, 1, ?, ?)
-                            """,
-                    request.ownerName(), request.ownerEmail().trim().toLowerCase(), JdbcTime.toTimestamp(now), JdbcTime.toTimestamp(now));
-
-            GeneratedKeys.insert(jdbcTemplate, """
-                            INSERT INTO team_member(organization_id, team_id, name, email, role, enabled, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                    request.organizationId(),
-                    teamId,
-                    request.ownerName(),
-                    request.ownerEmail(),
-                    "OWNER",
-                    1,
-                    JdbcTime.toTimestamp(now));
-            jdbcTemplate.update("UPDATE team_member SET user_id = ? WHERE team_id = ? AND email = ?", ownerUserId, teamId, request.ownerEmail().trim().toLowerCase());
-            jdbcTemplate.update("UPDATE team SET owner_user_id = ? WHERE id = ?", ownerUserId, teamId);
-
             jdbcTemplate.update("""
                             INSERT INTO quota_account(account_type, owner_id, available_tokens, frozen_tokens, consumed_tokens, version, updated_at)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
                     "TEAM",
                     teamId,
-                    500_000L,
+                    0L,
                     0L,
                     0L,
                     0L,
                     JdbcTime.toTimestamp(now));
+            jdbcTemplate.update("UPDATE team SET status = ? WHERE id = ?", request.ownerUserId() == null ? "DRAFT" : "READY_FOR_REQUEST", teamId);
+            if (request.ownerUserId() != null) setTeamOwner(teamId, request.ownerUserId());
 
             return findTeamSummary(teamId).orElseThrow(() -> new IllegalStateException("Created team was not found."));
         } catch (DuplicateKeyException ex) {
-            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Team name or owner email already exists.");
+            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Team name already exists.");
+        }
+    }
+
+    @Transactional
+    public TeamSummary setTeamOwner(long teamId, Long ownerUserId) {
+        long organizationId = findTeamOrganizationId(teamId);
+        if (ownerUserId == null) {
+            jdbcTemplate.update("UPDATE team SET owner_user_id = NULL, status = 'DRAFT' WHERE id = ?", teamId);
+            jdbcTemplate.update("UPDATE team_member SET role = 'MEMBER' WHERE team_id = ? AND role = 'OWNER'", teamId);
+            return findTeamSummary(teamId).orElseThrow(() -> new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Team was not found."));
+        }
+        try {
+            UserRecord user = jdbcTemplate.queryForObject("SELECT id, name, email FROM platform_user WHERE id = ? AND enabled = 1",
+                    (rs, row) -> new UserRecord(rs.getLong("id"), rs.getString("name"), rs.getString("email")), ownerUserId);
+            Long currentTeamId;
+            try {
+                currentTeamId = jdbcTemplate.queryForObject("SELECT team_id FROM team_member WHERE user_id = ?", Long.class, ownerUserId);
+            } catch (EmptyResultDataAccessException ignored) {
+                currentTeamId = null;
+            }
+            if (currentTeamId != null && currentTeamId != teamId) throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Transfer the user before assigning them as this team's owner.");
+            jdbcTemplate.update("UPDATE team_member SET role = 'MEMBER' WHERE team_id = ? AND role = 'OWNER'", teamId);
+            if (currentTeamId == null) {
+                jdbcTemplate.update("""
+                        INSERT INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
+                        VALUES (?, ?, ?, ?, ?, 'OWNER', 1, ?)
+                        """, organizationId, teamId, user.userId(), user.name(), user.email(), JdbcTime.toTimestamp(OffsetDateTime.now()));
+            } else {
+                jdbcTemplate.update("UPDATE team_member SET role = 'OWNER', enabled = 1 WHERE user_id = ?", ownerUserId);
+            }
+            jdbcTemplate.update("INSERT IGNORE INTO quota_account(account_type, owner_id, available_tokens, frozen_tokens, consumed_tokens, version, updated_at) SELECT 'MEMBER', id, 0, 0, 0, 0, ? FROM team_member WHERE user_id = ?", JdbcTime.toTimestamp(OffsetDateTime.now()), ownerUserId);
+            jdbcTemplate.update("UPDATE team SET owner_user_id = ?, status = CASE WHEN status IN ('SUSPENDED', 'ACTIVE') THEN status ELSE 'READY_FOR_REQUEST' END WHERE id = ?", ownerUserId, teamId);
+            return findTeamSummary(teamId).orElseThrow(() -> new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Team was not found."));
+        } catch (EmptyResultDataAccessException ex) {
+            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Owner user was not found or is disabled.");
         }
     }
 
@@ -321,6 +358,14 @@ public class AdminRepository {
                 request.modelConcurrency(),
                 request.enabled() == null ? null : (request.enabled() ? 1 : 0),
                 teamId);
+        if (Boolean.FALSE.equals(request.enabled())) {
+            jdbcTemplate.update("UPDATE team SET status = 'SUSPENDED' WHERE id = ?", teamId);
+        } else if (Boolean.TRUE.equals(request.enabled())) {
+            jdbcTemplate.update("""
+                    UPDATE team SET status = CASE WHEN owner_user_id IS NULL THEN 'DRAFT' ELSE 'READY_FOR_REQUEST' END
+                    WHERE id = ? AND status = 'SUSPENDED'
+                    """, teamId);
+        }
         return findTeamSummary(teamId)
                 .orElseThrow(() -> new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Team was not found."));
     }
@@ -408,8 +453,13 @@ public class AdminRepository {
                                 k.application_id,
                                 k.owner_member_id,
                                 q.id quota_account_id,
-                                k.allowed_models,
-                                k.enabled,
+                                COALESCE((SELECT GROUP_CONCAT(mma.model_name ORDER BY mma.model_name SEPARATOR ',')
+                                          FROM member_model_access mma
+                                          JOIN team_direct_model_access tma ON tma.team_id = k.team_id AND tma.model_name = mma.model_name
+                                          JOIN team_model_grant tmg ON tmg.team_id = k.team_id AND tmg.model_name = mma.model_name
+                                          WHERE mma.member_id = k.owner_member_id AND (tmg.expires_at IS NULL OR tmg.expires_at > NOW())), '') allowed_models,
+                                CASE WHEN k.enabled = 1 AND t.enabled = 1 AND t.status = 'ACTIVE'
+                                          AND m.enabled = 1 AND u.enabled = 1 THEN 1 ELSE 0 END enabled,
                                 k.expires_at,
                                 t.key_rpm,
                                 t.team_rpm,
@@ -418,7 +468,9 @@ public class AdminRepository {
                                 q.available_tokens
                             FROM virtual_api_key k
                             JOIN team t ON t.id = k.team_id
-                            JOIN quota_account q ON q.account_type = 'TEAM' AND q.owner_id = k.team_id
+                            JOIN team_member m ON m.id = k.owner_member_id
+                            JOIN platform_user u ON u.id = m.user_id
+                            JOIN quota_account q ON q.account_type = 'MEMBER' AND q.owner_id = m.id
                             WHERE k.key_hash = ?
                             """,
                     (rs, rowNum) -> new ApiKeyContext(
@@ -480,6 +532,7 @@ public class AdminRepository {
                     t.organization_id,
                     COALESCE((SELECT a.id FROM application a WHERE a.team_id = t.id ORDER BY a.id ASC LIMIT 1), 0) default_application_id,
                     t.name,
+                    t.status,
                     t.enabled,
                     t.key_rpm,
                     t.team_rpm,
@@ -501,6 +554,7 @@ public class AdminRepository {
                 rs.getLong("organization_id"),
                 rs.getLong("default_application_id"),
                 rs.getString("name"),
+                rs.getString("status"),
                 rs.getInt("enabled") == 1,
                 rs.getInt("key_rpm"),
                 rs.getInt("team_rpm"),
@@ -648,5 +702,8 @@ public class AdminRepository {
     }
 
     private record DemoMember(long teamId, String teamName, long memberId, String name, String email, String role) {
+    }
+
+    private record UserRecord(long userId, String name, String email) {
     }
 }

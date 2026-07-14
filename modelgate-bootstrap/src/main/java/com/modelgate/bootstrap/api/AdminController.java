@@ -1,6 +1,7 @@
 package com.modelgate.bootstrap.api;
 
 import com.modelgate.auth.VirtualKeyService;
+import com.modelgate.auth.TeamAccessService;
 import com.modelgate.auth.ProviderCredentialCipher;
 import com.modelgate.common.api.AdminDtos.*;
 import com.modelgate.infrastructure.db.AdminControlRepository;
@@ -8,6 +9,8 @@ import com.modelgate.infrastructure.db.AdminRepository;
 import com.modelgate.infrastructure.db.QuotaAccountRepository;
 import com.modelgate.infrastructure.db.UserRepository;
 import com.modelgate.infrastructure.db.ProviderCatalogRepository;
+import com.modelgate.infrastructure.db.TeamEntitlementRepository;
+import com.modelgate.infrastructure.db.BillingRepository;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -31,6 +34,9 @@ public class AdminController {
     private final UserRepository userRepository;
     private final ProviderCatalogRepository providerCatalogRepository;
     private final ProviderCredentialCipher providerCredentialCipher;
+    private final TeamEntitlementRepository teamEntitlementRepository;
+    private final TeamAccessService teamAccessService;
+    private final BillingRepository billingRepository;
 
     public AdminController(
             AdminRepository adminRepository,
@@ -39,7 +45,10 @@ public class AdminController {
             AdminControlRepository adminControlRepository,
             UserRepository userRepository,
             ProviderCatalogRepository providerCatalogRepository,
-            ProviderCredentialCipher providerCredentialCipher
+            ProviderCredentialCipher providerCredentialCipher,
+            TeamEntitlementRepository teamEntitlementRepository,
+            TeamAccessService teamAccessService,
+            BillingRepository billingRepository
     ) {
         this.adminRepository = adminRepository;
         this.quotaAccountRepository = quotaAccountRepository;
@@ -48,6 +57,9 @@ public class AdminController {
         this.userRepository = userRepository;
         this.providerCatalogRepository = providerCatalogRepository;
         this.providerCredentialCipher = providerCredentialCipher;
+        this.teamEntitlementRepository = teamEntitlementRepository;
+        this.teamAccessService = teamAccessService;
+        this.billingRepository = billingRepository;
     }
 
     @PostMapping("/bootstrap/demo")
@@ -75,17 +87,23 @@ public class AdminController {
 
     @PatchMapping("/users/{userId}")
     public Mono<UserItem> updateUser(@PathVariable("userId") long userId, @RequestBody UpdateUserRequest request) {
-        return Mono.fromCallable(() -> userRepository.update(userId, request)).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> {
+            UserItem user = userRepository.update(userId, request);
+            if (user.memberId() != null) virtualKeyService.invalidateMember(user.memberId());
+            return user;
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     @org.springframework.web.bind.annotation.PutMapping("/users/{userId}/team-membership")
     public Mono<UserItem> assignUserMembership(@PathVariable("userId") long userId, @Valid @RequestBody TeamMembershipRequest request) {
-        return Mono.fromCallable(() -> userRepository.assignMembership(userId, request)).subscribeOn(Schedulers.boundedElastic());
+        return Mono.error(new com.modelgate.common.error.ModelGateException(
+                com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
+                "Use the team owner assignment flow or the owner-led member endpoint instead of direct membership changes."));
     }
 
     @org.springframework.web.bind.annotation.DeleteMapping("/users/{userId}")
     public Mono<org.springframework.http.ResponseEntity<Void>> deleteUser(@PathVariable("userId") long userId) {
-        return Mono.fromRunnable(() -> userRepository.delete(userId)).subscribeOn(Schedulers.boundedElastic())
+        return Mono.fromRunnable(() -> virtualKeyService.invalidateKeyHashes(userRepository.delete(userId).apiKeyHashes())).subscribeOn(Schedulers.boundedElastic())
                 .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
@@ -93,12 +111,21 @@ public class AdminController {
     public Mono<CreateApiKeyResponse> createApiKey(@Valid @RequestBody CreateApiKeyRequest request) {
         return Mono.error(new com.modelgate.common.error.ModelGateException(
                 com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
-                "Create member-bound API keys with the team member endpoint."));
+                "Virtual keys are system-generated after a team owner grants member access."));
     }
 
     @PostMapping("/teams")
     public Mono<TeamSummary> createTeam(@Valid @RequestBody CreateTeamRequest request) {
         return Mono.fromCallable(() -> adminRepository.createTeam(request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @org.springframework.web.bind.annotation.PutMapping("/teams/{teamId}/owner")
+    public Mono<TeamSummary> setTeamOwner(@PathVariable("teamId") long teamId, @RequestBody SetTeamOwnerRequest request) {
+        return Mono.fromCallable(() -> {
+            TeamSummary team = adminRepository.setTeamOwner(teamId, request.ownerUserId());
+            virtualKeyService.invalidateTeam(teamId);
+            return team;
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     @GetMapping("/teams")
@@ -114,12 +141,20 @@ public class AdminController {
 
     @PatchMapping("/teams/{teamId}")
     public Mono<TeamSummary> updateTeam(@PathVariable("teamId") long teamId, @RequestBody UpdateTeamRequest request) {
-        return Mono.fromCallable(() -> adminRepository.updateTeam(teamId, request)).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> {
+            TeamSummary team = adminRepository.updateTeam(teamId, request);
+            virtualKeyService.invalidateTeam(teamId);
+            return team;
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     @org.springframework.web.bind.annotation.DeleteMapping("/teams/{teamId}")
     public Mono<org.springframework.http.ResponseEntity<Void>> deleteTeam(@PathVariable("teamId") long teamId) {
-        return Mono.fromRunnable(() -> userRepository.deleteTeam(teamId)).subscribeOn(Schedulers.boundedElastic())
+        return Mono.fromRunnable(() -> {
+            UserRepository.DeletedTeam deletedTeam = userRepository.deleteTeam(teamId);
+            virtualKeyService.invalidateKeyHashes(deletedTeam.apiKeyHashes());
+            deletedTeam.quotaAccountIds().forEach(virtualKeyService::invalidateQuotaAccount);
+        }).subscribeOn(Schedulers.boundedElastic())
                 .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
@@ -133,7 +168,76 @@ public class AdminController {
             @PathVariable("teamId") long teamId,
             @Valid @RequestBody CreateTeamMemberRequest request
     ) {
-        return Mono.fromCallable(() -> adminRepository.createTeamMember(teamId, request)).subscribeOn(Schedulers.boundedElastic());
+        return Mono.error(new com.modelgate.common.error.ModelGateException(
+                com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
+                "A team owner must add an existing platform user through the delegated membership endpoint."));
+    }
+
+    @PostMapping("/teams/{teamId}/members/from-user")
+    public Mono<TeamMemberItem> addExistingTeamMember(
+            @PathVariable("teamId") long teamId,
+            @Valid @RequestBody AddExistingTeamMemberRequest request
+    ) {
+        return Mono.fromCallable(() -> teamEntitlementRepository.addMember(teamId, request.ownerMemberId(), request.userId()))
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/teams/{teamId}/entitlement-requests")
+    public Mono<TeamEntitlementItem> requestTeamEntitlement(
+            @PathVariable("teamId") long teamId,
+            @Valid @RequestBody CreateTeamEntitlementRequest request
+    ) {
+        return Mono.fromCallable(() -> teamEntitlementRepository.request(teamId, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/teams/{teamId}/entitlement-requests")
+    public Mono<TeamEntitlementListResponse> teamEntitlementRequests(@PathVariable("teamId") long teamId) {
+        return Mono.fromCallable(() -> teamEntitlementRepository.requests(teamId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/entitlement-requests/{requestId}/review")
+    public Mono<TeamEntitlementItem> reviewTeamEntitlement(
+            @PathVariable("requestId") long requestId,
+            @Valid @RequestBody ReviewTeamEntitlementRequest request
+    ) {
+        return Mono.fromCallable(() -> {
+            TeamEntitlementItem reviewed = teamEntitlementRepository.review(requestId, request.decision(), request.reviewerNote());
+            virtualKeyService.invalidateTeam(reviewed.teamId());
+            return reviewed;
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/teams/{teamId}/members/{memberId}/access")
+    public Mono<MemberAccessResponse> grantMemberAccess(
+            @PathVariable("teamId") long teamId,
+            @PathVariable("memberId") long memberId,
+            @Valid @RequestBody GrantMemberAccessRequest request
+    ) {
+        return Mono.fromCallable(() -> teamAccessService.grant(teamId, memberId, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/teams/{teamId}/members/{memberId}/applications/{applicationId}/key-rotation")
+    public Mono<CreateApiKeyResponse> rotateMemberKey(
+            @PathVariable("teamId") long teamId,
+            @PathVariable("memberId") long memberId,
+            @PathVariable("applicationId") long applicationId,
+            @Valid @RequestBody RotateMemberKeyRequest request
+    ) {
+        return Mono.fromCallable(() -> teamAccessService.rotate(teamId, memberId, applicationId, request.ownerMemberId()))
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @org.springframework.web.bind.annotation.DeleteMapping("/teams/{teamId}/members/{memberId}/model-access/{modelName}")
+    public Mono<org.springframework.http.ResponseEntity<Void>> revokeMemberModelAccess(
+            @PathVariable("teamId") long teamId,
+            @PathVariable("memberId") long memberId,
+            @PathVariable("modelName") String modelName,
+            @Valid @RequestBody RevokeMemberModelAccessRequest request
+    ) {
+        return Mono.fromRunnable(() -> {
+            teamEntitlementRepository.revokeMemberModel(teamId, memberId, request.ownerMemberId(), modelName);
+            virtualKeyService.invalidateMember(memberId);
+        }).subscribeOn(Schedulers.boundedElastic()).thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
     @PatchMapping("/teams/{teamId}/members/{memberId}")
@@ -142,7 +246,9 @@ public class AdminController {
             @PathVariable("memberId") long memberId,
             @RequestBody UpdateTeamMemberRequest request
     ) {
-        return Mono.fromCallable(() -> adminRepository.updateTeamMember(teamId, memberId, request)).subscribeOn(Schedulers.boundedElastic());
+        return Mono.error(new com.modelgate.common.error.ModelGateException(
+                com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
+                "Team roles are managed through the team owner assignment flow."));
     }
 
     @PostMapping("/teams/{teamId}/members/{memberId}/api-keys")
@@ -151,8 +257,9 @@ public class AdminController {
             @PathVariable("memberId") long memberId,
             @Valid @RequestBody CreateMemberApiKeyRequest request
     ) {
-        return Mono.fromCallable(() -> virtualKeyService.createForMember(teamId, memberId, request))
-                .subscribeOn(Schedulers.boundedElastic());
+        return Mono.error(new com.modelgate.common.error.ModelGateException(
+                com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
+                "Virtual keys are generated by the system after a team owner grants member access."));
     }
 
     @PostMapping("/api-keys/{keyId}/disable")
@@ -172,6 +279,21 @@ public class AdminController {
     @GetMapping("/teams/{teamId}/quota")
     public Mono<QuotaResponse> quota(@PathVariable("teamId") long teamId) {
         return Mono.fromCallable(() -> quotaAccountRepository.findTeamQuota(teamId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/members/{memberId}/quota")
+    public Mono<MemberQuotaResponse> memberQuota(@PathVariable("memberId") long memberId) {
+        return Mono.fromCallable(() -> quotaAccountRepository.findMemberQuota(memberId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/teams/{teamId}/billing-summary")
+    public Mono<BillingSummary> teamBillingSummary(@PathVariable("teamId") long teamId) {
+        return Mono.fromCallable(() -> billingRepository.teamSummary(teamId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/members/{memberId}/billing-summary")
+    public Mono<BillingSummary> memberBillingSummary(@PathVariable("memberId") long memberId) {
+        return Mono.fromCallable(() -> billingRepository.memberSummary(memberId)).subscribeOn(Schedulers.boundedElastic());
     }
 
     @GetMapping("/providers")
@@ -303,7 +425,20 @@ public class AdminController {
 
     @org.springframework.web.bind.annotation.PutMapping("/teams/{teamId}/model-access")
     public Mono<TeamModelAccessResponse> updateTeamModelAccess(@PathVariable("teamId") long teamId, @RequestBody UpdateTeamModelAccessRequest request) {
-        return Mono.fromCallable(() -> adminControlRepository.replaceTeamModels(teamId, request.logicalModels())).subscribeOn(Schedulers.boundedElastic());
+        return Mono.error(new com.modelgate.common.error.ModelGateException(
+                com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
+                "Approve a team entitlement request instead of directly changing team model access."));
+    }
+
+    @org.springframework.web.bind.annotation.DeleteMapping("/teams/{teamId}/model-access/{modelName}")
+    public Mono<org.springframework.http.ResponseEntity<Void>> revokeTeamModelAccess(
+            @PathVariable("teamId") long teamId,
+            @PathVariable("modelName") String modelName
+    ) {
+        return Mono.fromRunnable(() -> {
+            teamEntitlementRepository.revokeTeamModel(teamId, modelName);
+            virtualKeyService.invalidateTeam(teamId);
+        }).subscribeOn(Schedulers.boundedElastic()).thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
     @GetMapping("/api-keys")

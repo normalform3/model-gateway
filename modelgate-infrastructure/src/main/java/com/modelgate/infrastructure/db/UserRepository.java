@@ -105,6 +105,7 @@ public class UserRepository {
         }
         if ("OWNER".equals(role)) {
             jdbcTemplate.update("UPDATE team SET owner_user_id = ? WHERE id = ?", userId, request.teamId());
+            jdbcTemplate.update("UPDATE team SET status = CASE WHEN status = 'DRAFT' THEN 'READY_FOR_REQUEST' ELSE status END WHERE id = ?", request.teamId());
         } else {
             Long ownerId = lookupLong("SELECT owner_user_id FROM team WHERE id = ?", request.teamId());
             if (ownerId != null && ownerId == userId) throw badRequest("Transfer team ownership before changing the owner role.");
@@ -113,23 +114,33 @@ public class UserRepository {
     }
 
     @Transactional
-    public void delete(long userId) {
+    public DeletedUser delete(long userId) {
         require(userId);
-        DependencySummary dependencies = userDependencies(userId);
-        if (!dependencies.empty()) {
-            throw new ModelGateException(ErrorCode.USER_HAS_DEPENDENCIES, dependencies.message("User"));
+        Long memberId = lookupLong("SELECT id FROM team_member WHERE user_id = ?", userId);
+        List<String> apiKeyHashes = memberId == null ? List.of()
+                : jdbcTemplate.queryForList("SELECT key_hash FROM virtual_api_key WHERE owner_member_id = ?", String.class, memberId);
+        if (memberId != null) {
+            deleteMemberData(userId, memberId);
         }
         jdbcTemplate.update("DELETE FROM platform_user WHERE id = ?", userId);
+        return new DeletedUser(apiKeyHashes);
     }
 
-    public void deleteTeam(long teamId) {
+    @Transactional
+    public DeletedTeam deleteTeam(long teamId) {
         Long found = lookupLong("SELECT id FROM team WHERE id = ?", teamId);
         if (found == null) throw badRequest("Team was not found.");
-        DependencySummary dependencies = teamDependencies(teamId);
-        if (!dependencies.empty()) {
-            throw new ModelGateException(ErrorCode.TEAM_HAS_DEPENDENCIES, dependencies.message("Team"));
-        }
+        List<String> apiKeyHashes = jdbcTemplate.queryForList("SELECT key_hash FROM virtual_api_key WHERE team_id = ?", String.class, teamId);
+        List<Long> quotaAccountIds = jdbcTemplate.queryForList("""
+                SELECT id FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?
+                UNION ALL
+                SELECT qa.id FROM quota_account qa
+                JOIN team_member m ON m.id = qa.owner_id
+                WHERE qa.account_type = 'MEMBER' AND m.team_id = ?
+                """, Long.class, teamId, teamId);
+        deleteTeamData(teamId);
         jdbcTemplate.update("DELETE FROM team WHERE id = ?", teamId);
+        return new DeletedTeam(apiKeyHashes, quotaAccountIds);
     }
 
     private UserItem require(long userId) {
@@ -147,24 +158,47 @@ public class UserRepository {
         }
     }
 
-    private DependencySummary userDependencies(long userId) {
-        Long memberId = lookupLong("SELECT id FROM team_member WHERE user_id = ?", userId);
-        int memberships = count("SELECT COUNT(*) FROM team_member WHERE user_id = ?", userId);
-        int keys = memberId == null ? 0 : count("SELECT COUNT(*) FROM virtual_api_key WHERE owner_member_id = ?", memberId);
-        int requests = memberId == null ? 0 : count("SELECT COUNT(*) FROM ai_request WHERE member_id = ?", memberId);
-        return new DependencySummary(memberships, keys, requests, 0, 0);
+    private void deleteMemberData(long userId, long memberId) {
+        Long quotaAccountId = lookupLong("SELECT id FROM quota_account WHERE account_type = 'MEMBER' AND owner_id = ?", memberId);
+        jdbcTemplate.update("UPDATE team SET owner_user_id = NULL, status = 'DRAFT' WHERE owner_user_id = ?", userId);
+        jdbcTemplate.update("DELETE FROM mq_consume_record WHERE event_id IN (SELECT event_id FROM usage_record WHERE member_id = ?)", memberId);
+        jdbcTemplate.update("DELETE FROM billing_record WHERE member_id = ?", memberId);
+        jdbcTemplate.update("DELETE FROM usage_record WHERE member_id = ?", memberId);
+        jdbcTemplate.update("DELETE FROM ai_request WHERE member_id = ?", memberId);
+        jdbcTemplate.update("DELETE FROM virtual_api_key WHERE owner_member_id = ?", memberId);
+        jdbcTemplate.update("DELETE FROM member_model_access WHERE member_id = ?", memberId);
+        jdbcTemplate.update("DELETE FROM team_entitlement_request WHERE owner_member_id = ?", memberId);
+        jdbcTemplate.update("DELETE FROM quota_transfer WHERE member_id = ?", memberId);
+        if (quotaAccountId != null) {
+            jdbcTemplate.update("DELETE FROM quota_transaction WHERE account_id = ?", quotaAccountId);
+            jdbcTemplate.update("DELETE FROM quota_account WHERE id = ?", quotaAccountId);
+        }
+        jdbcTemplate.update("DELETE FROM team_member WHERE id = ?", memberId);
     }
 
-    private DependencySummary teamDependencies(long teamId) {
-        return new DependencySummary(
-                count("SELECT COUNT(*) FROM team_member WHERE team_id = ?", teamId),
-                count("SELECT COUNT(*) FROM virtual_api_key WHERE team_id = ?", teamId),
-                count("SELECT COUNT(*) FROM ai_request WHERE team_id = ?", teamId),
-                count("SELECT COUNT(*) FROM application WHERE team_id = ?", teamId),
-                count("SELECT COUNT(*) FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?", teamId));
+    private void deleteTeamData(long teamId) {
+        jdbcTemplate.update("DELETE FROM mq_consume_record WHERE event_id IN (SELECT event_id FROM usage_record WHERE team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM billing_record WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM usage_record WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM ai_request WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM virtual_api_key WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM quota_transfer WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM team_entitlement_request WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM member_model_access WHERE member_id IN (SELECT id FROM team_member WHERE team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM quota_transaction WHERE account_id IN (SELECT id FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM quota_transaction WHERE account_id IN (SELECT qa.id FROM quota_account qa JOIN team_member m ON m.id = qa.owner_id WHERE qa.account_type = 'MEMBER' AND m.team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM quota_account WHERE account_type = 'MEMBER' AND owner_id IN (SELECT id FROM team_member WHERE team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM subject_model_access WHERE subject_id IN (SELECT id FROM access_subject WHERE team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM subject_entitlement WHERE subject_id IN (SELECT id FROM access_subject WHERE team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM access_subject WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM team_model_grant WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM team_direct_model_access WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM team_model_access WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM application WHERE team_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM team_member WHERE team_id = ?", teamId);
     }
 
-    private int count(String sql, Object value) { Integer count = jdbcTemplate.queryForObject(sql, Integer.class, value); return count == null ? 0 : count; }
     private Long lookupLong(String sql, Object value) { try { return jdbcTemplate.queryForObject(sql, Long.class, value); } catch (EmptyResultDataAccessException ex) { return null; } }
     private static int bool(Boolean value, boolean fallback) { return Boolean.TRUE.equals(value == null ? fallback : value) ? 1 : 0; }
     private static String normalizeRole(String role) { String normalized = role == null ? "" : role.trim().toUpperCase(); if (!"OWNER".equals(normalized) && !"MEMBER".equals(normalized)) throw badRequest("Membership role must be OWNER or MEMBER."); return normalized; }
@@ -173,8 +207,6 @@ public class UserRepository {
     private static Long nullableLong(Object value) { return value == null ? null : ((Number) value).longValue(); }
     private static ModelGateException badRequest(String message) { return new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, message); }
 
-    private record DependencySummary(int members, int keys, int requests, int applications, int quotaAccounts) {
-        boolean empty() { return members + keys + requests + applications + quotaAccounts == 0; }
-        String message(String resource) { return resource + " cannot be deleted while it has dependencies: members=" + members + ", keys=" + keys + ", requests=" + requests + ", applications=" + applications + ", quotaAccounts=" + quotaAccounts + "."; }
-    }
+    public record DeletedUser(List<String> apiKeyHashes) { }
+    public record DeletedTeam(List<String> apiKeyHashes, List<Long> quotaAccountIds) { }
 }

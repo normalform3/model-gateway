@@ -175,7 +175,7 @@ public class AdminControlRepository {
 
     public TeamModelAccessResponse teamModels(long teamId) {
         return new TeamModelAccessResponse(teamId, jdbcTemplate.queryForList(
-                "SELECT model_name FROM team_direct_model_access WHERE team_id = ? ORDER BY model_name", String.class, teamId));
+                "SELECT model_name FROM team_model_grant WHERE team_id = ? AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY model_name", String.class, teamId));
     }
 
     public TeamModelAccessResponse replaceTeamModels(long teamId, List<String> requestedModels) {
@@ -204,24 +204,32 @@ public class AdminControlRepository {
     }
 
     public VirtualApiKeyListResponse listKeys(String keyword, Long teamId, Long applicationId, Long memberId, Boolean enabled, String expiry, int page, int size) {
-        StringBuilder sql = new StringBuilder("""
+        String select = """
                 SELECT k.id, k.name, k.key_prefix, k.team_id, t.name team_name, k.application_id, a.name application_name,
-                       k.owner_member_id, m.name owner_member_name, k.allowed_models, k.enabled, k.expires_at, k.created_at
+                       k.owner_member_id, m.name owner_member_name,
+                       COALESCE((SELECT GROUP_CONCAT(mma.model_name ORDER BY mma.model_name SEPARATOR ',')
+                                 FROM member_model_access mma
+                                 JOIN team_model_grant tmg ON tmg.team_id = k.team_id AND tmg.model_name = mma.model_name
+                                 WHERE mma.member_id = k.owner_member_id AND (tmg.expires_at IS NULL OR tmg.expires_at > NOW())), '') allowed_models,
+                       k.enabled, k.expires_at, k.created_at
+                """;
+        String from = """
                 FROM virtual_api_key k JOIN team t ON t.id = k.team_id JOIN application a ON a.id = k.application_id
-                LEFT JOIN team_member m ON m.id = k.owner_member_id WHERE 1 = 1
-                """);
+                LEFT JOIN team_member m ON m.id = k.owner_member_id
+                """;
+        StringBuilder where = new StringBuilder(" WHERE 1 = 1");
         List<Object> args = new ArrayList<>();
-        if (keyword != null && !keyword.isBlank()) { sql.append(" AND (k.name LIKE ? OR k.key_prefix LIKE ?)"); args.add("%" + keyword.trim() + "%"); args.add("%" + keyword.trim() + "%"); }
-        if (teamId != null) { sql.append(" AND k.team_id = ?"); args.add(teamId); }
-        if (applicationId != null) { sql.append(" AND k.application_id = ?"); args.add(applicationId); }
-        if (memberId != null) { sql.append(" AND k.owner_member_id = ?"); args.add(memberId); }
-        if (enabled != null) { sql.append(" AND k.enabled = ?"); args.add(bool(enabled, true)); }
-        if ("EXPIRED".equalsIgnoreCase(expiry)) sql.append(" AND k.expires_at IS NOT NULL AND k.expires_at < NOW()");
-        if ("ACTIVE".equalsIgnoreCase(expiry)) sql.append(" AND (k.expires_at IS NULL OR k.expires_at >= NOW())");
-        long total = longCount("SELECT COUNT(*) " + sql.substring(sql.indexOf("FROM")), args.toArray());
-        sql.append(" ORDER BY k.created_at DESC LIMIT ? OFFSET ?");
+        if (keyword != null && !keyword.isBlank()) { where.append(" AND (k.name LIKE ? OR k.key_prefix LIKE ?)"); args.add("%" + keyword.trim() + "%"); args.add("%" + keyword.trim() + "%"); }
+        if (teamId != null) { where.append(" AND k.team_id = ?"); args.add(teamId); }
+        if (applicationId != null) { where.append(" AND k.application_id = ?"); args.add(applicationId); }
+        if (memberId != null) { where.append(" AND k.owner_member_id = ?"); args.add(memberId); }
+        if (enabled != null) { where.append(" AND k.enabled = ?"); args.add(bool(enabled, true)); }
+        if ("EXPIRED".equalsIgnoreCase(expiry)) where.append(" AND k.expires_at IS NOT NULL AND k.expires_at < NOW()");
+        if ("ACTIVE".equalsIgnoreCase(expiry)) where.append(" AND (k.expires_at IS NULL OR k.expires_at >= NOW())");
+        long total = longCount("SELECT COUNT(*) " + from + where, args.toArray());
+        String sql = select + from + where + " ORDER BY k.created_at DESC LIMIT ? OFFSET ?";
         List<Object> pageArgs = new ArrayList<>(args); pageArgs.add(size); pageArgs.add(page * size);
-        List<VirtualApiKeyItem> items = jdbcTemplate.query(sql.toString(), (rs, rowNum) -> new VirtualApiKeyItem(
+        List<VirtualApiKeyItem> items = jdbcTemplate.query(sql, (rs, rowNum) -> new VirtualApiKeyItem(
                 rs.getLong("id"), rs.getString("name"), rs.getString("key_prefix"), rs.getLong("team_id"), rs.getString("team_name"),
                 rs.getLong("application_id"), rs.getString("application_name"), nullableLong(rs.getObject("owner_member_id")),
                 rs.getString("owner_member_name"), split(rs.getString("allowed_models")), rs.getInt("enabled") == 1,
