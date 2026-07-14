@@ -198,7 +198,7 @@ public class AdminControlRepository {
                 FROM virtual_api_key k JOIN team t ON t.id = k.team_id
                 LEFT JOIN team_member m ON m.id = k.owner_member_id
                 """;
-        StringBuilder where = new StringBuilder(" WHERE 1 = 1");
+        StringBuilder where = new StringBuilder(" WHERE k.key_kind = 'STANDARD'");
         List<Object> args = new ArrayList<>();
         if (keyword != null && !keyword.isBlank()) { where.append(" AND (k.name LIKE ? OR k.key_prefix LIKE ?)"); args.add("%" + keyword.trim() + "%"); args.add("%" + keyword.trim() + "%"); }
         if (teamId != null) { where.append(" AND k.team_id = ?"); args.add(teamId); }
@@ -224,7 +224,7 @@ public class AdminControlRepository {
     public DashboardOverview dashboard() {
         int providers = count("SELECT COUNT(*) FROM provider WHERE enabled = 1");
         int teams = count("SELECT COUNT(*) FROM team WHERE enabled = 1");
-        int keys = count("SELECT COUNT(*) FROM virtual_api_key WHERE enabled = 1");
+        int keys = count("SELECT COUNT(*) FROM virtual_api_key WHERE enabled = 1 AND key_kind = 'STANDARD'");
         long requests = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)");
         long successes = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND status = 'SUCCESS'");
         long throttled = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND error_code IN ('RATE_LIMIT_EXCEEDED', 'CONCURRENCY_LIMIT_EXCEEDED')");

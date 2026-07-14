@@ -20,6 +20,12 @@ modelgate:
     master-key: ${MODELGATE_PROVIDER_MASTER_KEY:}
   mock:
     default-delay-ms: ${MODELGATE_MOCK_DELAY_MS:80}
+  test-observability:
+    enabled: ${MODELGATE_TEST_OBSERVABILITY_ENABLED:false}
+  test-runner:
+    auto-start: ${MODELGATE_TEST_RUNNER_AUTO_START:false}
+    jar-path: ${MODELGATE_TEST_RUNNER_JAR_PATH:tools/modelgate-test-runner/target/modelgate-test-runner-0.1.0-SNAPSHOT-all.jar}
+    port: ${MODELGATE_TEST_RUNNER_PORT:19090}
   quota:
     default-max-output-tokens: ${MODELGATE_DEFAULT_MAX_OUTPUT_TOKENS:512}
     request-ttl-seconds: ${MODELGATE_REQUEST_TTL_SECONDS:300}

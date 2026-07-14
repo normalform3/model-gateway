@@ -119,6 +119,28 @@ public final class AdminDtos {
     public record AddExistingTeamMemberRequest(@NotNull Long ownerMemberId, @NotNull Long userId) {
     }
 
+    /** Platform-admin variant for the development console; real RBAC will guard this operation later. */
+    public record AddPlatformTeamMemberRequest(@NotNull Long userId) {
+    }
+
+    public record UpdateMemberStatusRequest(@NotNull Boolean enabled) {
+    }
+
+    public record UpdateOwnedMemberStatusRequest(@NotNull Long ownerMemberId, @NotNull Boolean enabled) {
+    }
+
+    public record TeamMemberCandidate(
+            long userId,
+            String name,
+            String email,
+            String previousTeamName,
+            boolean rejoining
+    ) {
+    }
+
+    public record TeamMemberCandidateListResponse(List<TeamMemberCandidate> items) {
+    }
+
     public record UpdateTeamMemberRequest(
             String name,
             String email,
@@ -364,6 +386,62 @@ public final class AdminDtos {
     }
 
     public record MemberKeyStatusResponse(Long keyId, String keyPrefix, boolean enabled, boolean reissueRequired, OffsetDateTime createdAt) { }
+
+    public record UpsertModelEntitlementRequest(
+            @NotBlank String quotaMode,
+            Long quotaLimit,
+            String reason,
+            Long ownerMemberId
+    ) { }
+
+    public record ModelEntitlementItem(
+            long grantId,
+            long teamId,
+            Long memberId,
+            String modelName,
+            String quotaMode,
+            Long quotaLimit,
+            String status,
+            long consumedTokens,
+            long frozenTokens,
+            Long remainingTokens,
+            OffsetDateTime cycleStartedAt,
+            String reason,
+            OffsetDateTime createdAt,
+            OffsetDateTime revokedAt
+    ) { }
+
+    public record ModelEntitlementListResponse(List<ModelEntitlementItem> items) { }
+
+    public record UsageTrendItem(String day, long tokens, BigDecimal amount, long requests) { }
+
+    public record MemberUsageRankItem(long memberId, String memberName, long tokens, BigDecimal amount) { }
+
+    public record UsageDashboard(
+            long scopeId,
+            List<ModelEntitlementItem> modelEntitlements,
+            List<UsageTrendItem> lastSevenDays,
+            List<MemberUsageRankItem> memberRanking
+    ) { }
+
+    public record QuotaSummaryItem(
+            String modelName,
+            String quotaMode,
+            int teamCount,
+            long allocatedTokens,
+            long consumedTokens,
+            long frozenTokens,
+            long remainingTokens
+    ) { }
+
+    public record QuotaSummary(
+            long allocatedTokens,
+            long consumedTokens,
+            long frozenTokens,
+            long remainingTokens,
+            int unlimitedEntitlementCount,
+            List<QuotaSummaryItem> items
+    ) { }
 
     public record VirtualApiKeyItem(
             long keyId,

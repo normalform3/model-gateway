@@ -5,6 +5,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.modelgate.common.api.AdminDtos.CreateApiKeyResponse;
 import com.modelgate.common.domain.ApiKeyContext;
 import com.modelgate.common.domain.BudgetPolicy;
+import com.modelgate.common.domain.ModelQuotaPolicy;
+import com.modelgate.common.domain.QuotaMode;
 import com.modelgate.common.domain.RateLimitPolicy;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
@@ -23,6 +25,8 @@ import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Map;
+import java.util.LinkedHashMap;
 
 @Service
 public class VirtualKeyService {
@@ -144,6 +148,12 @@ public class VirtualKeyService {
             if (value == null || value.isBlank()) {
                 return Optional.empty();
             }
+            // Contexts written before model-scoped entitlements do not carry
+            // current policy ids; force one authoritative database reload.
+            if (value.split("\\|", -1).length < 15) {
+                redisTemplate.delete(redisKey(hash));
+                return Optional.empty();
+            }
             return Optional.of(decode(value));
         } catch (RuntimeException ex) {
             return Optional.empty();
@@ -183,7 +193,9 @@ public class VirtualKeyService {
                 Integer.toString(context.rateLimitPolicy().modelConcurrency()),
                 Long.toString(context.budgetPolicy().maxAvailableTokens()),
                 Boolean.toString(context.enabled()),
-                context.expiresAt() == null ? "" : context.expiresAt().toString());
+                context.expiresAt() == null ? "" : context.expiresAt().toString(),
+                encodePolicies(context.teamModelQuotas()),
+                encodePolicies(context.memberModelQuotas()));
     }
 
     private ApiKeyContext decode(String value) {
@@ -191,6 +203,8 @@ public class VirtualKeyService {
         Long memberId = p[3].isBlank() ? null : Long.parseLong(p[3]);
         Set<String> models = p[5].isBlank() ? Set.of() : new LinkedHashSet<>(Arrays.asList(p[5].split(",")));
         OffsetDateTime expiresAt = p[12].isBlank() ? null : OffsetDateTime.parse(p[12]);
+        Map<String, ModelQuotaPolicy> teams = p.length > 13 ? decodePolicies(p[13]) : Map.of();
+        Map<String, ModelQuotaPolicy> members = p.length > 14 ? decodePolicies(p[14]) : Map.of();
         return new ApiKeyContext(
                 Long.parseLong(p[0]),
                 Long.parseLong(p[1]),
@@ -198,6 +212,8 @@ public class VirtualKeyService {
                 memberId,
                 Long.parseLong(p[4]),
                 models,
+                teams,
+                members,
                 new RateLimitPolicy(
                         Integer.parseInt(p[6]),
                         Integer.parseInt(p[7]),
@@ -206,6 +222,21 @@ public class VirtualKeyService {
                 new BudgetPolicy(Long.parseLong(p[10])),
                 Boolean.parseBoolean(p[11]),
                 expiresAt);
+    }
+
+    private String encodePolicies(Map<String, ModelQuotaPolicy> policies) {
+        return policies.values().stream().map(policy -> policy.modelName() + "~" + policy.grantId() + "~" + policy.mode() + "~" + (policy.limit() == null ? "" : policy.limit())).collect(java.util.stream.Collectors.joining(","));
+    }
+
+    private Map<String, ModelQuotaPolicy> decodePolicies(String value) {
+        Map<String, ModelQuotaPolicy> policies = new LinkedHashMap<>();
+        if (value == null || value.isBlank()) return policies;
+        for (String entry : value.split(",")) {
+            String[] values = entry.split("~", -1);
+            if (values.length != 4) continue;
+            policies.put(values[0], new ModelQuotaPolicy(Long.parseLong(values[1]), values[0], QuotaMode.valueOf(values[2]), values[3].isBlank() ? null : Long.parseLong(values[3])));
+        }
+        return policies;
     }
 
     private String randomToken() {

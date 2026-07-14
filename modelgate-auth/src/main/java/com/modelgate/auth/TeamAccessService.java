@@ -7,6 +7,7 @@ import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.infrastructure.db.AdminRepository;
 import com.modelgate.infrastructure.db.TeamEntitlementRepository;
+import com.modelgate.infrastructure.db.ModelEntitlementRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,11 +17,13 @@ public class TeamAccessService {
     private final TeamEntitlementRepository entitlements;
     private final AdminRepository adminRepository;
     private final VirtualKeyService virtualKeyService;
+    private final ModelEntitlementRepository modelEntitlements;
 
-    public TeamAccessService(TeamEntitlementRepository entitlements, AdminRepository adminRepository, VirtualKeyService virtualKeyService) {
+    public TeamAccessService(TeamEntitlementRepository entitlements, AdminRepository adminRepository, VirtualKeyService virtualKeyService, ModelEntitlementRepository modelEntitlements) {
         this.entitlements = entitlements;
         this.adminRepository = adminRepository;
         this.virtualKeyService = virtualKeyService;
+        this.modelEntitlements = modelEntitlements;
     }
 
     @Transactional
@@ -34,8 +37,8 @@ public class TeamAccessService {
     @Transactional
     public CreateApiKeyResponse generate(long memberId, boolean rotate) {
         TeamEntitlementRepository.MemberKeyScope scope = entitlements.lockMemberForKey(memberId);
-        if (scope.availableTokens() <= 0 || scope.models().isEmpty()) {
-            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "A positive quota and at least one granted model are required before generating a Key.");
+        if (modelEntitlements.runtimePolicies(scope.teamId(), memberId).member().isEmpty()) {
+            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "At least one granted model is required before generating a Key.");
         }
         adminRepository.findActiveMemberKeyId(scope.teamId(), memberId).ifPresent(keyId -> {
             if (!rotate) throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "An active Key already exists. Rotate it instead.");

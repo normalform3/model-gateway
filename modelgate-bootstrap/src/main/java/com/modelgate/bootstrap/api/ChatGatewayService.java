@@ -47,6 +47,7 @@ public class ChatGatewayService {
     private final UsageEventPublisher usageEventPublisher;
     private final StringRedisTemplate redisTemplate;
     private final OpenAiCompatibleProviderClient openAiCompatibleProviderClient;
+    private final TestObservabilityService testObservabilityService;
 
     public ChatGatewayService(
             VirtualKeyService virtualKeyService,
@@ -57,7 +58,8 @@ public class ChatGatewayService {
             QuotaService quotaService,
             UsageEventPublisher usageEventPublisher,
             StringRedisTemplate redisTemplate,
-            OpenAiCompatibleProviderClient openAiCompatibleProviderClient
+            OpenAiCompatibleProviderClient openAiCompatibleProviderClient,
+            TestObservabilityService testObservabilityService
     ) {
         this.virtualKeyService = virtualKeyService;
         this.routeRepository = routeRepository;
@@ -68,12 +70,13 @@ public class ChatGatewayService {
         this.usageEventPublisher = usageEventPublisher;
         this.redisTemplate = redisTemplate;
         this.openAiCompatibleProviderClient = openAiCompatibleProviderClient;
+        this.testObservabilityService = testObservabilityService;
     }
 
-    public Mono<ChatCompletionResponse> complete(String authorization, String idempotencyKey, ChatCompletionRequest request) {
+    public Mono<ChatCompletionResponse> complete(String authorization, String idempotencyKey, String testRunId, ChatCompletionRequest request) {
         long start = System.currentTimeMillis();
         String requestId = requestId();
-        return prepare(authorization, idempotencyKey, request, requestId)
+        return prepare(authorization, idempotencyKey, testRunId, request, requestId)
                 .flatMap(ctx -> {
                     ApiKeyContext apiKey = ctx.apiKey();
                     RouteTarget target = ctx.target();
@@ -97,14 +100,14 @@ public class ChatGatewayService {
                 });
     }
 
-    public Flux<ServerSentEvent<Object>> stream(String authorization, String idempotencyKey, ChatCompletionRequest request) {
+    public Flux<ServerSentEvent<Object>> stream(String authorization, String idempotencyKey, String testRunId, ChatCompletionRequest request) {
         long start = System.currentTimeMillis();
         String requestId = requestId();
         AtomicLong firstTokenMs = new AtomicLong(-1L);
         AtomicReference<Usage> usageRef = new AtomicReference<>();
         StringBuilder content = new StringBuilder();
 
-        return prepare(authorization, idempotencyKey, request, requestId)
+        return prepare(authorization, idempotencyKey, testRunId, request, requestId)
                 .flatMapMany(ctx -> {
                     ApiKeyContext apiKey = ctx.apiKey();
                     RouteTarget target = ctx.target();
@@ -122,17 +125,18 @@ public class ChatGatewayService {
                 });
     }
 
-    private Mono<PreparedRequest> prepare(String authorization, String idempotencyKey, ChatCompletionRequest request, String requestId) {
+    private Mono<PreparedRequest> prepare(String authorization, String idempotencyKey, String testRunId, ChatCompletionRequest request, String requestId) {
         return Mono.fromCallable(() -> {
             ApiKeyContext apiKey = virtualKeyService.authenticate(authorization);
             virtualKeyService.assertModelAllowed(apiKey, request.model());
             reserveIdempotency(apiKey, idempotencyKey);
             RouteTarget target = routeRepository.findFirstTarget(request.model())
                     .orElseThrow(() -> new ModelGateException(ErrorCode.MODEL_ROUTE_NOT_FOUND, "No route target for model: " + request.model(), requestId));
+            String resolvedTestRunId = testObservabilityService.resolveRunId(apiKey, testRunId, target);
             int inputTokens = tokenEstimator.estimateInputTokens(request);
             int maxOutputTokens = tokenEstimator.maxOutputTokens(request);
             QuotaReservation reservation = quotaService.reserve(apiKey, target, requestId, inputTokens, maxOutputTokens);
-            requestRepository.insertStarted(requestId, apiKey, request.model(), target, request.streamEnabled(), inputTokens, reservation.estimatedTokens());
+            requestRepository.insertStarted(requestId, apiKey, request.model(), target, request.streamEnabled(), inputTokens, reservation.estimatedTokens(), resolvedTestRunId);
             return new PreparedRequest(apiKey, target, reservation);
         }).subscribeOn(Schedulers.boundedElastic());
     }

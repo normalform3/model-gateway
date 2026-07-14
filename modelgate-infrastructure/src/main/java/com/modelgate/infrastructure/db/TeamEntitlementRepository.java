@@ -19,11 +19,49 @@ public class TeamEntitlementRepository {
     public TeamEntitlementRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
     @Transactional public TeamMemberItem addMember(long teamId, long ownerMemberId, long userId) {
-        requireOwner(teamId, ownerMemberId); TeamInfo team = team(teamId); UserInfo user = user(userId);
-        Long existing = nullable("SELECT team_id FROM team_member WHERE user_id = ?", userId);
-        if (existing != null && existing != teamId) throw bad("A user can belong to only one team.");
-        long id = existing == null ? GeneratedKeys.insert(jdbc, "INSERT INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at) VALUES (?, ?, ?, ?, ?, 'MEMBER', 1, ?)", team.organizationId(), teamId, userId, user.name(), user.email(), now()) : require("SELECT id FROM team_member WHERE user_id = ?", userId);
-        account("MEMBER", id); return member(teamId, id);
+        requireOwner(teamId, ownerMemberId);
+        return addMember(teamId, userId);
+    }
+
+    /** Development-console platform-admin entry point. Authentication will own this distinction later. */
+    @Transactional public TeamMemberItem addMemberAsPlatform(long teamId, long userId) {
+        return addMember(teamId, userId);
+    }
+
+    @Transactional public MemberDeactivation deactivateMember(long teamId, long memberId, Long ownerMemberId) {
+        if (ownerMemberId != null) requireOwner(teamId, ownerMemberId);
+        TeamMemberItem member = member(teamId, memberId);
+        if ("OWNER".equals(member.role())) throw bad("Transfer team ownership before removing the current owner.");
+
+        List<Long> grantIds = jdbc.query("SELECT id FROM model_entitlement_grant WHERE team_id = ? AND member_id = ? AND status = 'ACTIVE'", (rs, row) -> rs.getLong(1), teamId, memberId);
+        List<String> keyHashes = jdbc.queryForList("SELECT key_hash FROM virtual_api_key WHERE owner_member_id = ?", String.class, memberId);
+        Long quotaAccountId = nullable("SELECT id FROM quota_account WHERE account_type = 'MEMBER' AND owner_id = ?", memberId);
+
+        // A revoked entitlement is no longer visible to runtime policy queries, while
+        // its model-period usage remains attached to the original grant for audit.
+        // Request, usage and billing facts retain member_id/team_id and remain untouched.
+        jdbc.update("UPDATE model_entitlement_grant SET status = 'REVOKED', revoked_at = ? WHERE team_id = ? AND member_id = ? AND status = 'ACTIVE'", now(), teamId, memberId);
+        jdbc.update("DELETE FROM member_model_access WHERE member_id = ?", memberId);
+        jdbc.update("UPDATE virtual_api_key SET enabled = 0 WHERE owner_member_id = ?", memberId);
+        jdbc.update("UPDATE team_member SET enabled = 0 WHERE id = ? AND team_id = ?", memberId, teamId);
+        return new MemberDeactivation(memberId, grantIds, keyHashes, quotaAccountId);
+    }
+
+    private TeamMemberItem addMember(long teamId, long userId) {
+        TeamInfo team = team(teamId); UserInfo user = user(userId);
+        ExistingMember existing = jdbc.query("SELECT id, team_id, enabled FROM team_member WHERE user_id = ?", (rs, row) -> new ExistingMember(rs.getLong("id"), rs.getLong("team_id"), rs.getInt("enabled") == 1), userId).stream().findFirst().orElse(null);
+        long id;
+        if (existing == null) {
+            id = GeneratedKeys.insert(jdbc, "INSERT INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at) VALUES (?, ?, ?, ?, ?, 'MEMBER', 1, ?)", team.organizationId(), teamId, userId, user.name(), user.email(), now());
+        } else if (existing.enabled()) {
+            if (existing.teamId() != teamId) throw bad("A user can belong to only one active team.");
+            throw bad("This user is already an active member of the team.");
+        } else {
+            id = existing.memberId();
+            jdbc.update("UPDATE team_member SET organization_id = ?, team_id = ?, name = ?, email = ?, role = 'MEMBER', enabled = 1 WHERE id = ?", team.organizationId(), teamId, user.name(), user.email(), id);
+        }
+        account("MEMBER", id);
+        return member(teamId, id);
     }
 
     @Transactional public TeamEntitlementItem request(long teamId, CreateTeamEntitlementRequest request) {
@@ -69,7 +107,7 @@ public class TeamEntitlementRepository {
     public void revokeTeamModel(long teamId, String model) { requireTeamOwnerExists(teamId); jdbc.update("DELETE FROM team_model_grant WHERE team_id = ? AND model_name = ?", teamId, model); jdbc.update("DELETE FROM team_direct_model_access WHERE team_id = ? AND model_name = ?", teamId, model); }
     private TeamEntitlementItem item(long id) { try { return jdbc.queryForObject("SELECT id, team_id, owner_member_id, requested_models, requested_tokens, granted_models, granted_tokens, purpose, expires_at, status, reviewer_note, created_at, reviewed_at FROM team_entitlement_request WHERE id = ?", (rs, row) -> map(rs.getLong("id"), rs.getLong("team_id"), rs.getLong("owner_member_id"), rs.getString("requested_models"), rs.getLong("requested_tokens"), rs.getString("granted_models"), (Long)rs.getObject("granted_tokens"), rs.getString("purpose"), JdbcTime.toOffsetDateTime(rs.getTimestamp("expires_at")), rs.getString("status"), rs.getString("reviewer_note"), JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at")), JdbcTime.toOffsetDateTime(rs.getTimestamp("reviewed_at"))), id); } catch (EmptyResultDataAccessException e) { throw bad("Entitlement request was not found."); } }
     private TeamEntitlementItem map(long id,long team,long owner,String requested,long requestedTokens,String granted,Long grantedTokens,String purpose,OffsetDateTime expires,String status,String note,OffsetDateTime created,OffsetDateTime reviewed) { return new TeamEntitlementItem(id, team, owner, split(requested), requestedTokens, split(granted), grantedTokens, purpose, expires, status, note, created, reviewed); }
-    private void requireOwner(long team,long owner) { if (count("SELECT COUNT(*) FROM team t JOIN team_member m ON m.team_id = t.id WHERE t.id = ? AND m.id = ? AND m.user_id = t.owner_user_id AND m.role = 'OWNER' AND m.enabled = 1", team,owner)==0) throw bad("This operation requires the active team owner."); }
+    private void requireOwner(long team,long owner) { if (count("SELECT COUNT(*) FROM team t JOIN team_member m ON m.team_id = t.id WHERE t.id = ? AND t.enabled = 1 AND m.id = ? AND m.user_id = t.owner_user_id AND m.role = 'OWNER' AND m.enabled = 1", team,owner)==0) throw bad("This operation requires the active team owner."); }
     private void requireTeamOwnerExists(long team) { if (count("SELECT COUNT(*) FROM team t JOIN team_member m ON m.team_id=t.id AND m.user_id=t.owner_user_id AND m.role='OWNER' AND m.enabled=1 WHERE t.id=? AND t.enabled=1",team)==0) throw bad("A team needs an active owner."); }
     private TeamInfo team(long id) { try { return jdbc.queryForObject("SELECT id, organization_id, status FROM team WHERE id = ? AND enabled = 1",(rs,row)->new TeamInfo(rs.getLong("id"),rs.getLong("organization_id"),rs.getString("status")),id); } catch (EmptyResultDataAccessException e) { throw bad("Team was not found or is disabled."); } }
     private UserInfo user(long id) { try { return jdbc.queryForObject("SELECT id,name,email FROM platform_user WHERE id=? AND enabled=1",(rs,row)->new UserInfo(rs.getLong("id"),rs.getString("name"),rs.getString("email")),id); } catch (EmptyResultDataAccessException e) { throw bad("User was not found or is disabled."); } }
@@ -85,6 +123,8 @@ public class TeamEntitlementRepository {
     private static ModelGateException bad(String message) { return new ModelGateException(ErrorCode.BAD_MODEL_REQUEST,message); }
     public record MemberAccessSnapshot(long memberId,long quotaAccountId,long availableTokens,List<String> models) { }
     public record MemberKeyScope(long teamId,long availableTokens,List<String> models) { }
+    public record MemberDeactivation(long memberId, List<Long> entitlementGrantIds, List<String> keyHashes, Long quotaAccountId) { }
+    private record ExistingMember(long memberId, long teamId, boolean enabled) { }
     private record TeamInfo(long teamId,long organizationId,String status) { }
     private record UserInfo(long userId,String name,String email) { }
 }

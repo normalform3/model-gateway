@@ -10,7 +10,7 @@ Organization 企业
           └── Virtual API Key 虚拟密钥
 ```
 
-授权链固定为：平台管理员向团队发放模型权限和公共 Token，团队负责人再向成员划拨 Token 与模型权限，系统据此签发成员 Key。团队负责人为空时团队为 `DRAFT`，不得接收授权。
+授权链固定为：平台管理员按模型向团队发放周期权益，团队负责人再按模型向成员发放周期权益，系统据此签发成员 Key。团队负责人为空时团队为 `DRAFT`，不得接收授权。
 
 ## 核心表分组
 
@@ -24,6 +24,8 @@ Organization 企业
 - `team_entitlement_request`
 - `team_model_grant`
 - `member_model_access`
+- `model_entitlement_grant`
+- `model_entitlement_usage`
 
 模型管理：
 
@@ -62,6 +64,8 @@ public record ApiKeyContext(
         Long memberId,
         Long quotaAccountId,
         Set<String> allowedModels,
+        Map<String, ModelQuotaPolicy> teamModelQuotas,
+        Map<String, ModelQuotaPolicy> memberModelQuotas,
         RateLimitPolicy rateLimitPolicy,
         BudgetPolicy budgetPolicy,
         boolean enabled
@@ -75,7 +79,7 @@ public record ApiKeyContext(
 - 明文虚拟 Key 只在创建时返回一次。
 - 真实 Provider 凭据不暴露给业务应用。
 - 成员级计量依赖独立虚拟 Key。Key 只绑定 `owner_member_id`，不能用共享 Key 伪造按人统计。
-- 负责人不生成 Key，只完成成员模型权限与额度划拨；开发者在 Key 页面自行生成。模型权限不再存为 Key 的事实来源。
+- 负责人同时也是开发者，可在自己的 Key 页面生成或轮换个人 Key，也可在团队概览中向自己发放成员权益。模型权限与逐模型周期策略不再存为 Key 的事实来源。
 
 ## Provider、直接模型与团队授权
 
@@ -88,7 +92,7 @@ public record ApiKeyContext(
 
 ## team_member
 
-`platform_user` 保存全局用户资料。`team_member` 是用户与团队的唯一归属关系；一个用户最多属于一个团队，一个团队仅一位 `OWNER`。
+`platform_user` 保存全局用户资料。`team_member` 是用户与团队的唯一归属关系；一个用户最多属于一个**活动**团队，一个团队仅一位活动 `OWNER`。
 
 关键字段：
 
@@ -104,6 +108,8 @@ public record ApiKeyContext(
 `virtual_api_key.owner_member_id` 指向实际使用者。MVP 暂不做登录和 RBAC 校验，但负责人上下文仍必须与团队所有者关系匹配，便于后续接入权限系统。
 
 控制台可直接选择负责人或开发成员用户切换上下文；该选择只控制筛选范围，不构成登录、认证或 RBAC。
+
+移出成员不是删除 `platform_user`，而是将 `team_member.enabled` 置为 `0`：当前成员模型权益、兼容访问记录和虚拟 Key 会立即失效，调用、用量和账单事实继续保留原 `member_id` 与 `team_id`。重新加入时复用同一成员记录，但不会恢复旧权益或旧 Key。
 
 ## ai_request
 
@@ -135,6 +141,12 @@ CREATE TABLE ai_request (
 );
 ```
 
+## 开发期测试 Key 与运行归因
+
+`virtual_api_key.key_kind` 区分 `STANDARD` 与 `TEST`。`TEST` Key 绑定真实 `owner_member_id`，并通过 `test_run_id` 与一次开发期测试关联；它使用成员的原模型权限和额度，但不参与常规 Key 列表或仪表盘 Key 数量。
+
+`ai_request.test_run_id` 是可空的运行归因字段。观察接口只据此关联既有 `usage_record`、`billing_record` 与额度流水，不创建第二套计量或账单表。测试完成后 Key 被停用，保留脱敏审计记录；过期时间是 Runner 异常退出时的兜底。
+
 ## usage_record
 
 用量事实表记录 Token 和 Provider 返回的 Usage 信息。
@@ -162,9 +174,17 @@ CREATE TABLE ai_request (
 - 后续账单回查。
 - 人工补偿。
 
-## quota_account
+## model_entitlement_grant 与 model_entitlement_usage
 
-额度账户记录实时账户状态，但最终正确性必须结合流水校验。
+运行时额度事实以逐模型权益为准。`model_entitlement_grant` 记录团队或成员的 `DAILY`、`WEEKLY`、`UNLIMITED` 策略；同一“团队/成员 + 模型”只有一条 `ACTIVE` 权益。调整直接更新该记录并保留 `grantId`。成员被移出时，其 `ACTIVE` 权益改为 `REVOKED` 并写入撤销时间，不物理删除，以保留已关联的历史用量；运行时和控制台当前权益列表只读取 `ACTIVE` 行。`quota_limit` 始终以原始 Token 整数保存；控制台仅在显示和输入时换算为百万、亿或万亿，不能将单位文本写入数据库。
+
+`model_entitlement_usage` 以权益和周期开始时间为主键，保存消费、冻结和版本。成员移出通过撤销权益而不是删除权益，因而对应的历史用量可追溯。周期采用 `Asia/Shanghai`：每日 00:00、每周周一 00:00 重置且不结转。有限成员权益必须与团队同模型权益周期一致；团队不限时成员可选择任意周期或不限。
+
+网关对团队和成员两层有限权益同时预占、结算和释放；不限权益只统计用量。平台配额仪表盘只聚合启用团队的团队级 `ACTIVE` 权益，成员权益是从团队权益划拨出的子集，不能再次累计；不限权益单独计数，不与有限额度做比例。`quota_account`、`quota_transfer` 与 `quota_transaction` 仅保留旧账本审计，不再作为新网关额度校验来源。
+
+## quota_account（旧账本）
+
+额度账户记录历史一次性余额，迁移后不参与运行时校验。
 
 关键字段：
 

@@ -9,12 +9,16 @@ import com.modelgate.common.api.AdminDtos.RequestLogItem;
 import com.modelgate.common.api.AdminDtos.RequestLogResponse;
 import com.modelgate.common.api.AdminDtos.TeamListResponse;
 import com.modelgate.common.api.AdminDtos.TeamMemberItem;
+import com.modelgate.common.api.AdminDtos.TeamMemberCandidate;
+import com.modelgate.common.api.AdminDtos.TeamMemberCandidateListResponse;
 import com.modelgate.common.api.AdminDtos.TeamMemberListResponse;
 import com.modelgate.common.api.AdminDtos.TeamSummary;
 import com.modelgate.common.api.AdminDtos.UpdateTeamMemberRequest;
 import com.modelgate.common.api.AdminDtos.UpdateTeamRequest;
 import com.modelgate.common.domain.ApiKeyContext;
 import com.modelgate.common.domain.BudgetPolicy;
+import com.modelgate.common.domain.ModelQuotaPolicy;
+import com.modelgate.common.domain.QuotaMode;
 import com.modelgate.common.domain.RateLimitPolicy;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
@@ -32,11 +36,15 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Set;
 
 @Repository
 public class AdminRepository {
     private static final String DEMO_ORGANIZATION_NAME = "Demo Organization";
+    private static final Set<String> TEAM_STATUSES = Set.of("DRAFT", "READY_FOR_REQUEST", "ACTIVE", "SUSPENDED", "DISSOLVED");
     private static final String DEMO_TEAM_NAME = "Demo Team";
     private static final String DEMO_OWNER_EMAIL = "demo-owner@example.com";
     private static final String DEMO_DEVELOPER_EMAIL = "demo-developer@example.com";
@@ -171,7 +179,7 @@ public class AdminRepository {
     public Optional<Long> findActiveMemberKeyId(long teamId, long memberId) {
         try {
             return Optional.ofNullable(jdbcTemplate.queryForObject("""
-                    SELECT id FROM virtual_api_key WHERE team_id = ? AND owner_member_id = ? AND enabled = 1
+                    SELECT id FROM virtual_api_key WHERE team_id = ? AND owner_member_id = ? AND enabled = 1 AND key_kind = 'STANDARD'
                     ORDER BY id DESC LIMIT 1
                     """, Long.class, teamId, memberId));
         } catch (EmptyResultDataAccessException ex) { return Optional.empty(); }
@@ -235,17 +243,31 @@ public class AdminRepository {
                     (rs, row) -> new UserRecord(rs.getLong("id"), rs.getString("name"), rs.getString("email")), ownerUserId);
             Long currentTeamId;
             try {
-                currentTeamId = jdbcTemplate.queryForObject("SELECT team_id FROM team_member WHERE user_id = ?", Long.class, ownerUserId);
+                currentTeamId = jdbcTemplate.queryForObject("SELECT team_id FROM team_member WHERE user_id = ? AND enabled = 1", Long.class, ownerUserId);
             } catch (EmptyResultDataAccessException ignored) {
                 currentTeamId = null;
             }
             if (currentTeamId != null && currentTeamId != teamId) throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Transfer the user before assigning them as this team's owner.");
             jdbcTemplate.update("UPDATE team_member SET role = 'MEMBER' WHERE team_id = ? AND role = 'OWNER'", teamId);
             if (currentTeamId == null) {
-                jdbcTemplate.update("""
-                        INSERT INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
-                        VALUES (?, ?, ?, ?, ?, 'OWNER', 1, ?)
-                        """, organizationId, teamId, user.userId(), user.name(), user.email(), JdbcTime.toTimestamp(OffsetDateTime.now()));
+                Long historicalMemberId;
+                try {
+                    historicalMemberId = jdbcTemplate.queryForObject("SELECT id FROM team_member WHERE user_id = ?", Long.class, ownerUserId);
+                } catch (EmptyResultDataAccessException ignored) {
+                    historicalMemberId = null;
+                }
+                if (historicalMemberId == null) {
+                    jdbcTemplate.update("""
+                            INSERT INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
+                            VALUES (?, ?, ?, ?, ?, 'OWNER', 1, ?)
+                            """, organizationId, teamId, user.userId(), user.name(), user.email(), JdbcTime.toTimestamp(OffsetDateTime.now()));
+                } else {
+                    jdbcTemplate.update("""
+                            UPDATE team_member
+                            SET organization_id = ?, team_id = ?, name = ?, email = ?, role = 'OWNER', enabled = 1
+                            WHERE id = ?
+                            """, organizationId, teamId, user.name(), user.email(), historicalMemberId);
+                }
             } else {
                 jdbcTemplate.update("UPDATE team_member SET role = 'OWNER', enabled = 1 WHERE user_id = ?", ownerUserId);
             }
@@ -257,13 +279,31 @@ public class AdminRepository {
         }
     }
 
-    public TeamListResponse listTeams(String keyword, Boolean enabled, String logicalModel, Long ownerUserId, int page, int size) {
+    public TeamListResponse listTeams(String keyword, Boolean enabled, String status, String logicalModel, Long ownerUserId, Boolean ownerAssigned, int page, int size) {
         StringBuilder where = new StringBuilder("WHERE 1 = 1");
         List<Object> args = new java.util.ArrayList<>();
-        if (keyword != null && !keyword.isBlank()) { where.append(" AND t.name LIKE ?"); args.add("%" + keyword.trim() + "%"); }
+        if (keyword != null && !keyword.isBlank()) {
+            String pattern = "%" + keyword.trim() + "%";
+            where.append("""
+                     AND (t.name LIKE ? OR CAST(t.id AS CHAR) LIKE ? OR EXISTS (
+                         SELECT 1 FROM team_member owner
+                         WHERE owner.team_id = t.id AND owner.role = 'OWNER' AND owner.enabled = 1
+                           AND (owner.name LIKE ? OR owner.email LIKE ?)
+                     ))
+                    """);
+            args.add(pattern); args.add(pattern); args.add(pattern); args.add(pattern);
+        }
         if (enabled != null) { where.append(" AND t.enabled = ?"); args.add(enabled ? 1 : 0); }
+        if (status != null && !status.isBlank()) {
+            String normalizedStatus = status.trim().toUpperCase(Locale.ROOT);
+            if (!TEAM_STATUSES.contains(normalizedStatus)) {
+                throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Unsupported team status filter.");
+            }
+            where.append(" AND t.status = ?"); args.add(normalizedStatus);
+        }
         if (logicalModel != null && !logicalModel.isBlank()) { where.append(" AND EXISTS (SELECT 1 FROM team_direct_model_access ma WHERE ma.team_id = t.id AND ma.model_name = ?)"); args.add(logicalModel); }
         if (ownerUserId != null) { where.append(" AND t.owner_user_id = ?"); args.add(ownerUserId); }
+        if (ownerAssigned != null) { where.append(ownerAssigned ? " AND t.owner_user_id IS NOT NULL" : " AND t.owner_user_id IS NULL"); }
         Long total = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM team t " + where, Long.class, args.toArray());
         List<Object> pageArgs = new java.util.ArrayList<>(args); pageArgs.add(size); pageArgs.add(page * size);
         List<TeamSummary> items = jdbcTemplate.query(teamSummarySql(where.toString()) + " LIMIT ? OFFSET ?",
@@ -282,6 +322,9 @@ public class AdminRepository {
     }
 
     public TeamSummary updateTeam(long teamId, UpdateTeamRequest request) {
+        TeamSummary current = findTeamSummary(teamId)
+                .orElseThrow(() -> new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Team was not found."));
+        if ("DISSOLVED".equals(current.status())) throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Team has been dissolved and cannot be updated.");
         jdbcTemplate.update("""
                         UPDATE team
                         SET name = COALESCE(NULLIF(?, ''), name),
@@ -290,7 +333,7 @@ public class AdminRepository {
                             team_concurrency = COALESCE(?, team_concurrency),
                             model_concurrency = COALESCE(?, model_concurrency),
                             enabled = COALESCE(?, enabled)
-                        WHERE id = ?
+                        WHERE id = ? AND status <> 'DISSOLVED'
                         """,
                 request.name(),
                 request.keyRpm(),
@@ -316,11 +359,31 @@ public class AdminRepository {
                         SELECT id, organization_id, team_id, name, email, role, enabled, created_at
                         FROM team_member
                         WHERE team_id = ?
-                        ORDER BY role DESC, id ASC
+                        ORDER BY enabled DESC, role DESC, id ASC
                         """,
                 (rs, rowNum) -> mapTeamMember(rs),
                 teamId);
         return new TeamMemberListResponse(items);
+    }
+
+    /** Enabled users without an active membership. A disabled former membership may be safely reactivated. */
+    public TeamMemberCandidateListResponse listTeamMemberCandidates(long teamId) {
+        List<TeamMemberCandidate> items = jdbcTemplate.query("""
+                        SELECT u.id user_id, u.name, u.email, previous_member.id previous_member_id,
+                               previous_team.name previous_team_name
+                        FROM platform_user u
+                        LEFT JOIN team_member previous_member ON previous_member.user_id = u.id
+                        LEFT JOIN team previous_team ON previous_team.id = previous_member.team_id
+                        WHERE u.enabled = 1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM team_member active_member
+                              WHERE active_member.user_id = u.id AND active_member.enabled = 1
+                          )
+                        ORDER BY u.name, u.id
+                        """, (rs, rowNum) -> new TeamMemberCandidate(
+                rs.getLong("user_id"), rs.getString("name"), rs.getString("email"),
+                rs.getString("previous_team_name"), rs.getObject("previous_member_id") != null));
+        return new TeamMemberCandidateListResponse(items);
     }
 
     public TeamMemberItem createTeamMember(long teamId, CreateTeamMemberRequest request) {
@@ -386,7 +449,7 @@ public class AdminRepository {
 
     public Optional<ApiKeyContext> findApiKeyContextByHash(String keyHash) {
         try {
-            return Optional.ofNullable(jdbcTemplate.queryForObject("""
+            ApiKeyContext base = jdbcTemplate.queryForObject("""
                             SELECT
                                 k.id key_id,
                                 k.organization_id,
@@ -405,12 +468,12 @@ public class AdminRepository {
                                 t.team_rpm,
                                 t.team_concurrency,
                                 t.model_concurrency,
-                                q.available_tokens
+                                COALESCE(q.available_tokens, 0) available_tokens
                             FROM virtual_api_key k
                             JOIN team t ON t.id = k.team_id
                             JOIN team_member m ON m.id = k.owner_member_id
                             JOIN platform_user u ON u.id = m.user_id
-                            JOIN quota_account q ON q.account_type = 'MEMBER' AND q.owner_id = m.id
+                            LEFT JOIN quota_account q ON q.account_type = 'MEMBER' AND q.owner_id = m.id
                             WHERE k.key_hash = ?
                             """,
                     (rs, rowNum) -> new ApiKeyContext(
@@ -419,7 +482,9 @@ public class AdminRepository {
                             rs.getLong("team_id"),
                             nullableLong(rs.getObject("owner_member_id")),
                             rs.getLong("quota_account_id"),
-                            splitAllowedModels(rs.getString("allowed_models")),
+                            Set.of(),
+                            Map.of(),
+                            Map.of(),
                             new RateLimitPolicy(
                                     rs.getInt("key_rpm"),
                                     rs.getInt("team_rpm"),
@@ -428,11 +493,26 @@ public class AdminRepository {
                             new BudgetPolicy(rs.getLong("available_tokens")),
                             rs.getInt("enabled") == 1,
                             JdbcTime.toOffsetDateTime(rs.getTimestamp("expires_at"))
-                    ),
-                    keyHash));
+                    ), keyHash);
+            Map<String, ModelQuotaPolicy> teamPolicies = modelPolicies(base.teamId(), null);
+            Map<String, ModelQuotaPolicy> memberPolicies = modelPolicies(base.teamId(), base.memberId());
+            memberPolicies.keySet().removeIf(model -> !teamPolicies.containsKey(model));
+            return Optional.of(new ApiKeyContext(base.keyId(), base.organizationId(), base.teamId(), base.memberId(), base.quotaAccountId(),
+                    Set.copyOf(memberPolicies.keySet()), teamPolicies, memberPolicies, base.rateLimitPolicy(), base.budgetPolicy(), base.enabled(), base.expiresAt()));
         } catch (EmptyResultDataAccessException ex) {
             return Optional.empty();
         }
+    }
+
+    private Map<String, ModelQuotaPolicy> modelPolicies(long teamId, Long memberId) {
+        Map<String, ModelQuotaPolicy> result = new LinkedHashMap<>();
+        String sql = memberId == null
+                ? "SELECT id, model_name, quota_mode, quota_limit FROM model_entitlement_grant WHERE team_id = ? AND member_id IS NULL AND status = 'ACTIVE'"
+                : "SELECT id, model_name, quota_mode, quota_limit FROM model_entitlement_grant WHERE team_id = ? AND member_id = ? AND status = 'ACTIVE'";
+        Object[] args = memberId == null ? new Object[]{teamId} : new Object[]{teamId, memberId};
+        jdbcTemplate.query(sql, (org.springframework.jdbc.core.RowCallbackHandler) rs -> result.put(rs.getString("model_name"), new ModelQuotaPolicy(rs.getLong("id"), rs.getString("model_name"),
+                QuotaMode.valueOf(rs.getString("quota_mode")), nullableLong(rs.getObject("quota_limit")))), args);
+        return result;
     }
 
     private String teamSummarySql(String whereClause) {
@@ -448,11 +528,11 @@ public class AdminRepository {
                     t.team_concurrency,
                     t.model_concurrency,
                     t.owner_user_id,
-                    (SELECT m.id FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' ORDER BY m.id ASC LIMIT 1) owner_member_id,
-                    (SELECT m.name FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' ORDER BY m.id ASC LIMIT 1) owner_name,
-                    (SELECT m.email FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' ORDER BY m.id ASC LIMIT 1) owner_email,
-                    (SELECT COUNT(*) FROM team_member m WHERE m.team_id = t.id) member_count,
-                    (SELECT COUNT(*) FROM virtual_api_key k WHERE k.team_id = t.id) key_count
+                    (SELECT m.id FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' AND m.enabled = 1 ORDER BY m.id ASC LIMIT 1) owner_member_id,
+                    (SELECT m.name FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' AND m.enabled = 1 ORDER BY m.id ASC LIMIT 1) owner_name,
+                    (SELECT m.email FROM team_member m WHERE m.team_id = t.id AND m.role = 'OWNER' AND m.enabled = 1 ORDER BY m.id ASC LIMIT 1) owner_email,
+                    (SELECT COUNT(*) FROM team_member m WHERE m.team_id = t.id AND m.enabled = 1) member_count,
+                    (SELECT COUNT(*) FROM virtual_api_key k WHERE k.team_id = t.id AND k.enabled = 1) key_count
                 FROM team t
                 """ + whereClause + " ORDER BY t.id DESC";
     }
@@ -545,7 +625,7 @@ public class AdminRepository {
     private long findTeamOrganizationId(long teamId) {
         try {
             Long organizationId = jdbcTemplate.queryForObject(
-                    "SELECT organization_id FROM team WHERE id = ?",
+                    "SELECT organization_id FROM team WHERE id = ? AND enabled = 1",
                     Long.class,
                     teamId);
             if (organizationId == null) {

@@ -4,6 +4,8 @@ import com.modelgate.auth.VirtualKeyService;
 import com.modelgate.auth.TeamAccessService;
 import com.modelgate.auth.ProviderCredentialCipher;
 import com.modelgate.common.api.AdminDtos.*;
+import com.modelgate.common.domain.ModelQuotaPolicy;
+import com.modelgate.common.domain.QuotaMode;
 import com.modelgate.infrastructure.db.AdminControlRepository;
 import com.modelgate.infrastructure.db.AdminRepository;
 import com.modelgate.infrastructure.db.QuotaAccountRepository;
@@ -11,6 +13,8 @@ import com.modelgate.infrastructure.db.UserRepository;
 import com.modelgate.infrastructure.db.ProviderCatalogRepository;
 import com.modelgate.infrastructure.db.TeamEntitlementRepository;
 import com.modelgate.infrastructure.db.BillingRepository;
+import com.modelgate.infrastructure.db.ModelEntitlementRepository;
+import com.modelgate.quota.QuotaService;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -37,6 +41,8 @@ public class AdminController {
     private final TeamEntitlementRepository teamEntitlementRepository;
     private final TeamAccessService teamAccessService;
     private final BillingRepository billingRepository;
+    private final ModelEntitlementRepository modelEntitlementRepository;
+    private final QuotaService quotaService;
 
     public AdminController(
             AdminRepository adminRepository,
@@ -48,7 +54,9 @@ public class AdminController {
             ProviderCredentialCipher providerCredentialCipher,
             TeamEntitlementRepository teamEntitlementRepository,
             TeamAccessService teamAccessService,
-            BillingRepository billingRepository
+            BillingRepository billingRepository,
+            ModelEntitlementRepository modelEntitlementRepository,
+            QuotaService quotaService
     ) {
         this.adminRepository = adminRepository;
         this.quotaAccountRepository = quotaAccountRepository;
@@ -60,6 +68,8 @@ public class AdminController {
         this.teamEntitlementRepository = teamEntitlementRepository;
         this.teamAccessService = teamAccessService;
         this.billingRepository = billingRepository;
+        this.modelEntitlementRepository = modelEntitlementRepository;
+        this.quotaService = quotaService;
     }
 
     @PostMapping("/bootstrap/demo")
@@ -125,11 +135,13 @@ public class AdminController {
     public Mono<TeamListResponse> teams(
             @org.springframework.web.bind.annotation.RequestParam(name = "keyword", required = false) String keyword,
             @org.springframework.web.bind.annotation.RequestParam(name = "enabled", required = false) Boolean enabled,
+            @org.springframework.web.bind.annotation.RequestParam(name = "status", required = false) String status,
             @org.springframework.web.bind.annotation.RequestParam(name = "logicalModel", required = false) String logicalModel,
             @org.springframework.web.bind.annotation.RequestParam(name = "ownerUserId", required = false) Long ownerUserId,
+            @org.springframework.web.bind.annotation.RequestParam(name = "ownerAssigned", required = false) Boolean ownerAssigned,
             @org.springframework.web.bind.annotation.RequestParam(name = "page", defaultValue = "0") int page,
             @org.springframework.web.bind.annotation.RequestParam(name = "size", defaultValue = "20") int size) {
-        return Mono.fromCallable(() -> adminRepository.listTeams(keyword, enabled, logicalModel, ownerUserId, safePage(page), safeSize(size))).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> adminRepository.listTeams(keyword, enabled, status, logicalModel, ownerUserId, ownerAssigned, safePage(page), safeSize(size))).subscribeOn(Schedulers.boundedElastic());
     }
 
     @PatchMapping("/teams/{teamId}")
@@ -151,19 +163,34 @@ public class AdminController {
                 .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
+    @PostMapping("/teams/{teamId}/dissolve")
+    public Mono<org.springframework.http.ResponseEntity<Void>> dissolveTeam(@PathVariable("teamId") long teamId) {
+        return Mono.fromRunnable(() -> {
+            UserRepository.DissolvedTeam dissolvedTeam = userRepository.dissolveTeam(teamId);
+            virtualKeyService.invalidateKeyHashes(dissolvedTeam.apiKeyHashes());
+            dissolvedTeam.quotaAccountIds().forEach(virtualKeyService::invalidateQuotaAccount);
+            quotaService.evictEntitlements(dissolvedTeam.entitlementGrantIds());
+        }).subscribeOn(Schedulers.boundedElastic())
+                .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+    }
+
     @GetMapping("/teams/{teamId}/members")
     public Mono<TeamMemberListResponse> teamMembers(@PathVariable("teamId") long teamId) {
         return Mono.fromCallable(() -> adminRepository.listTeamMembers(teamId)).subscribeOn(Schedulers.boundedElastic());
     }
 
+    @GetMapping("/teams/{teamId}/member-candidates")
+    public Mono<TeamMemberCandidateListResponse> teamMemberCandidates(@PathVariable("teamId") long teamId) {
+        return Mono.fromCallable(() -> adminRepository.listTeamMemberCandidates(teamId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
     @PostMapping("/teams/{teamId}/members")
     public Mono<TeamMemberItem> createTeamMember(
             @PathVariable("teamId") long teamId,
-            @Valid @RequestBody CreateTeamMemberRequest request
+            @Valid @RequestBody AddPlatformTeamMemberRequest request
     ) {
-        return Mono.error(new com.modelgate.common.error.ModelGateException(
-                com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
-                "A team owner must add an existing platform user through the delegated membership endpoint."));
+        return Mono.fromCallable(() -> teamEntitlementRepository.addMemberAsPlatform(teamId, request.userId()))
+                .subscribeOn(Schedulers.boundedElastic());
     }
 
     @PostMapping("/teams/{teamId}/members/from-user")
@@ -195,7 +222,12 @@ public class AdminController {
 
     @PostMapping("/teams/{teamId}/entitlements")
     public Mono<org.springframework.http.ResponseEntity<Void>> grantTeamEntitlement(@PathVariable("teamId") long teamId, @Valid @RequestBody GrantTeamEntitlementRequest request) {
-        return Mono.fromRunnable(() -> { teamEntitlementRepository.grantTeam(teamId, request); virtualKeyService.invalidateTeam(teamId); }).subscribeOn(Schedulers.boundedElastic()).thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+        return Mono.fromRunnable(() -> {
+            teamEntitlementRepository.grantTeam(teamId, request); // retained legacy ledger/audit write
+            for (String model : request.modelNames()) modelEntitlementRepository.upsertTeam(teamId, model,
+                    new UpsertModelEntitlementRequest("DAILY", request.tokenAllocation(), request.reason(), null));
+            virtualKeyService.invalidateTeam(teamId);
+        }).subscribeOn(Schedulers.boundedElastic()).thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
     @PostMapping("/entitlement-requests/{requestId}/review")
@@ -205,6 +237,10 @@ public class AdminController {
     ) {
         return Mono.fromCallable(() -> {
             TeamEntitlementItem reviewed = teamEntitlementRepository.review(requestId, request);
+            if ("APPROVED".equals(reviewed.status()) && reviewed.grantedTokens() != null) {
+                for (String model : reviewed.grantedModelNames()) modelEntitlementRepository.upsertTeam(reviewed.teamId(), model,
+                        new UpsertModelEntitlementRequest("DAILY", reviewed.grantedTokens(), reviewed.reviewerNote(), null));
+            }
             virtualKeyService.invalidateTeam(reviewed.teamId());
             return reviewed;
         }).subscribeOn(Schedulers.boundedElastic());
@@ -216,7 +252,13 @@ public class AdminController {
             @PathVariable("memberId") long memberId,
             @Valid @RequestBody GrantMemberAccessRequest request
     ) {
-        return Mono.fromCallable(() -> teamAccessService.grant(teamId, memberId, request)).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> {
+            MemberAccessResponse legacy = teamAccessService.grant(teamId, memberId, request);
+            for (String model : request.modelNames()) modelEntitlementRepository.upsertMember(teamId, memberId, model,
+                    new UpsertModelEntitlementRequest("DAILY", request.tokenAllocation(), request.reason(), request.ownerMemberId()));
+            virtualKeyService.invalidateMember(memberId);
+            return legacy;
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     @GetMapping("/members/{memberId}/api-key-status")
@@ -248,14 +290,35 @@ public class AdminController {
     }
 
     @PatchMapping("/teams/{teamId}/members/{memberId}")
-    public Mono<TeamMemberItem> updateTeamMember(
+    public Mono<org.springframework.http.ResponseEntity<Void>> updateTeamMember(
             @PathVariable("teamId") long teamId,
             @PathVariable("memberId") long memberId,
-            @RequestBody UpdateTeamMemberRequest request
+            @Valid @RequestBody UpdateMemberStatusRequest request
     ) {
-        return Mono.error(new com.modelgate.common.error.ModelGateException(
-                com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
-                "Team roles are managed through the team owner assignment flow."));
+        if (request.enabled()) {
+            return Mono.error(new com.modelgate.common.error.ModelGateException(
+                    com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
+                    "Use the member-add endpoint to reactivate a team membership."));
+        }
+        return Mono.fromRunnable(() -> deactivateMember(teamEntitlementRepository.deactivateMember(teamId, memberId, null)))
+                .subscribeOn(Schedulers.boundedElastic())
+                .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+    }
+
+    @PatchMapping("/teams/{teamId}/members/{memberId}/from-owner")
+    public Mono<org.springframework.http.ResponseEntity<Void>> updateOwnedTeamMember(
+            @PathVariable("teamId") long teamId,
+            @PathVariable("memberId") long memberId,
+            @Valid @RequestBody UpdateOwnedMemberStatusRequest request
+    ) {
+        if (request.enabled()) {
+            return Mono.error(new com.modelgate.common.error.ModelGateException(
+                    com.modelgate.common.error.ErrorCode.BAD_MODEL_REQUEST,
+                    "Use the member-add endpoint to reactivate a team membership."));
+        }
+        return Mono.fromRunnable(() -> deactivateMember(teamEntitlementRepository.deactivateMember(teamId, memberId, request.ownerMemberId())))
+                .subscribeOn(Schedulers.boundedElastic())
+                .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
     @PostMapping("/api-keys/{keyId}/disable")
@@ -274,6 +337,71 @@ public class AdminController {
     @GetMapping("/members/{memberId}/quota")
     public Mono<MemberQuotaResponse> memberQuota(@PathVariable("memberId") long memberId) {
         return Mono.fromCallable(() -> quotaAccountRepository.findMemberQuota(memberId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/teams/{teamId}/model-entitlements")
+    public Mono<ModelEntitlementListResponse> teamModelEntitlements(@PathVariable("teamId") long teamId) {
+        return Mono.fromCallable(() -> modelEntitlementRepository.teamEntitlements(teamId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @org.springframework.web.bind.annotation.PutMapping("/teams/{teamId}/model-entitlements/{modelName}")
+    public Mono<ModelEntitlementItem> upsertTeamModelEntitlement(@PathVariable("teamId") long teamId, @PathVariable("modelName") String modelName, @Valid @RequestBody UpsertModelEntitlementRequest request) {
+        return Mono.fromCallable(() -> {
+            ModelEntitlementItem item = modelEntitlementRepository.upsertTeam(teamId, modelName, request);
+            virtualKeyService.invalidateTeam(teamId);
+            quotaService.refreshEntitlement(policy(item));
+            return item;
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @org.springframework.web.bind.annotation.DeleteMapping("/teams/{teamId}/model-entitlements/{modelName}")
+    public Mono<org.springframework.http.ResponseEntity<Void>> revokeTeamModelEntitlement(@PathVariable("teamId") long teamId, @PathVariable("modelName") String modelName) {
+        return Mono.fromRunnable(() -> {
+            quotaService.evictEntitlements(modelEntitlementRepository.revokeTeam(teamId, modelName));
+            virtualKeyService.invalidateTeam(teamId);
+        }).subscribeOn(Schedulers.boundedElastic()).thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+    }
+
+    @GetMapping("/teams/{teamId}/members/{memberId}/model-entitlements")
+    public Mono<ModelEntitlementListResponse> memberModelEntitlements(@PathVariable("teamId") long teamId, @PathVariable("memberId") long memberId) {
+        return Mono.fromCallable(() -> modelEntitlementRepository.memberEntitlements(teamId, memberId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @org.springframework.web.bind.annotation.PutMapping("/teams/{teamId}/members/{memberId}/model-entitlements/{modelName}")
+    public Mono<ModelEntitlementItem> upsertMemberModelEntitlement(@PathVariable("teamId") long teamId, @PathVariable("memberId") long memberId, @PathVariable("modelName") String modelName, @Valid @RequestBody UpsertModelEntitlementRequest request) {
+        return Mono.fromCallable(() -> {
+            ModelEntitlementItem item = modelEntitlementRepository.upsertMember(teamId, memberId, modelName, request);
+            virtualKeyService.invalidateMember(memberId);
+            quotaService.refreshEntitlement(policy(item));
+            return item;
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @org.springframework.web.bind.annotation.DeleteMapping("/teams/{teamId}/members/{memberId}/model-entitlements/{modelName}")
+    public Mono<org.springframework.http.ResponseEntity<Void>> revokeMemberModelEntitlement(@PathVariable("teamId") long teamId, @PathVariable("memberId") long memberId, @PathVariable("modelName") String modelName, @org.springframework.web.bind.annotation.RequestParam long ownerMemberId) {
+        return Mono.fromRunnable(() -> {
+            quotaService.evictEntitlements(modelEntitlementRepository.revokeMember(teamId, memberId, modelName, ownerMemberId));
+            virtualKeyService.invalidateMember(memberId);
+        }).subscribeOn(Schedulers.boundedElastic()).thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+    }
+
+    @GetMapping("/teams/{teamId}/usage-dashboard")
+    public Mono<UsageDashboard> teamUsageDashboard(@PathVariable("teamId") long teamId) {
+        return Mono.fromCallable(() -> modelEntitlementRepository.teamDashboard(teamId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/members/{memberId}/usage-dashboard")
+    public Mono<UsageDashboard> memberUsageDashboard(@PathVariable("memberId") long memberId) {
+        return Mono.fromCallable(() -> modelEntitlementRepository.memberDashboard(memberId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/dashboard/quota-summary")
+    public Mono<QuotaSummary> quotaSummary() {
+        return Mono.fromCallable(modelEntitlementRepository::platformQuotaSummary).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private static ModelQuotaPolicy policy(ModelEntitlementItem item) {
+        return new ModelQuotaPolicy(item.grantId(), item.modelName(), QuotaMode.valueOf(item.quotaMode()), item.quotaLimit());
     }
 
     @GetMapping("/teams/{teamId}/billing-summary")
@@ -446,4 +574,10 @@ public class AdminController {
     private int safePage(int page) { return Math.max(0, page); }
 
     private int safeSize(int size) { return Math.min(100, Math.max(1, size)); }
+
+    private void deactivateMember(TeamEntitlementRepository.MemberDeactivation deactivation) {
+        quotaService.evictEntitlements(deactivation.entitlementGrantIds());
+        virtualKeyService.invalidateKeyHashes(deactivation.keyHashes());
+        if (deactivation.quotaAccountId() != null) virtualKeyService.invalidateQuotaAccount(deactivation.quotaAccountId());
+    }
 }

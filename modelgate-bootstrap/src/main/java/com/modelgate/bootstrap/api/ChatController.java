@@ -25,14 +25,15 @@ public class ChatController {
     public Mono<ResponseEntity<?>> completions(
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestHeader(value = "X-ModelGate-Test-Run-Id", required = false) String testRunId,
             @Valid @RequestBody ChatCompletionRequest request
     ) {
         if (request.streamEnabled()) {
             return Mono.just(ResponseEntity.ok()
                     .contentType(MediaType.TEXT_EVENT_STREAM)
-                    .body(chatGatewayService.stream(authorization, idempotencyKey, request)));
+                    .body(chatGatewayService.stream(authorization, idempotencyKey, testRunId, request)));
         }
-        return chatGatewayService.complete(authorization, idempotencyKey, request)
+        return chatGatewayService.complete(authorization, idempotencyKey, testRunId, request)
                 .map(response -> ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(response));
     }
 }

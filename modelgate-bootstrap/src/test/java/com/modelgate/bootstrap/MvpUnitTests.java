@@ -6,12 +6,18 @@ import com.modelgate.common.api.AdminDtos.DemoIdentity;
 import com.modelgate.common.api.AdminDtos.DemoIdentityResponse;
 import com.modelgate.common.api.AdminDtos.CreateTeamRequest;
 import com.modelgate.common.api.AdminDtos.GrantMemberAccessRequest;
+import com.modelgate.common.api.AdminDtos.ModelEntitlementItem;
+import com.modelgate.common.api.AdminDtos.UpsertModelEntitlementRequest;
 import com.modelgate.common.api.AdminDtos.UserItem;
 import com.modelgate.common.chat.ChatCompletionRequest;
 import com.modelgate.common.chat.ChatMessage;
 import com.modelgate.common.chat.MockBehavior;
 import com.modelgate.common.domain.ApiKeyContext;
 import com.modelgate.common.domain.BudgetPolicy;
+import com.modelgate.common.domain.EntitlementQuotaLimits;
+import com.modelgate.common.domain.QuotaMode;
+import com.modelgate.infrastructure.db.ModelEntitlementRepository;
+import com.modelgate.infrastructure.db.TeamEntitlementRepository;
 import com.modelgate.common.domain.RateLimitPolicy;
 import com.modelgate.common.event.UsageReportedEvent;
 import com.modelgate.common.error.ModelGateException;
@@ -30,11 +36,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.dao.EmptyResultDataAccessException;
 import reactor.test.StepVerifier;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.Map;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.time.OffsetDateTime;
@@ -134,6 +142,56 @@ class MvpUnitTests {
     }
 
     @Test
+    void teamDirectoryFiltersByKeywordStatusOwnerAndPaginates() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+        AdminRepository repository = new AdminRepository(jdbcTemplate);
+
+        repository.listTeams("demo", true, "ACTIVE", null, 8L, true, 2, 20);
+
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("CAST(t.id AS CHAR)")
+                && sql.contains("owner.name LIKE ?")
+                && sql.contains("t.status = ?")
+                && sql.contains("t.owner_user_id = ?"));
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("LIMIT ? OFFSET ?"));
+    }
+
+    @Test
+    void teamDirectoryRejectsUnknownStatus() {
+        AdminRepository repository = new AdminRepository(new RecordingJdbcTemplate());
+
+        assertThatThrownBy(() -> repository.listTeams(null, null, "RETIRED", null, null, null, 0, 20))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("Unsupported team status filter");
+    }
+
+    @Test
+    void teamDirectorySupportsUnassignedOwnersAndUnfilteredDefault() {
+        RecordingJdbcTemplate unassignedJdbc = new RecordingJdbcTemplate();
+        new AdminRepository(unassignedJdbc).listTeams(null, null, null, null, null, false, 0, 20);
+        assertThat(unassignedJdbc.queries).anyMatch(sql -> sql.contains("t.owner_user_id IS NULL"));
+
+        RecordingJdbcTemplate defaultJdbc = new RecordingJdbcTemplate();
+        new AdminRepository(defaultJdbc).listTeams(null, null, null, null, null, null, 0, 20);
+        assertThat(defaultJdbc.queries).anyMatch(sql -> sql.startsWith("SELECT COUNT(*) FROM team t WHERE 1 = 1"));
+    }
+
+    @Test
+    void dissolvingTeamDisablesAccessButRetainsLedgerData() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+        UserRepository repository = new UserRepository(jdbcTemplate);
+
+        UserRepository.DissolvedTeam dissolvedTeam = repository.dissolveTeam(2L);
+
+        assertThat(dissolvedTeam.apiKeyHashes()).containsExactly("key-hash-1");
+        assertThat(dissolvedTeam.quotaAccountIds()).containsExactly(7L);
+        assertThat(dissolvedTeam.entitlementGrantIds()).containsExactly(31L);
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("UPDATE virtual_api_key SET enabled = 0"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("UPDATE team_member SET enabled = 0"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("status = 'DISSOLVED'"));
+        assertThat(jdbcTemplate.updates).noneMatch(call -> call.sql().contains("DELETE FROM usage_record") || call.sql().contains("DELETE FROM billing_record") || call.sql().contains("DELETE FROM quota_account") || call.sql().contains("DELETE FROM model_entitlement_grant"));
+    }
+
+    @Test
     void virtualKeyCountQueryUsesTheOuterFromClause() {
         RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
 
@@ -175,6 +233,8 @@ class MvpUnitTests {
                 4L,
                 5L,
                 Set.of("smart-chat"),
+                Map.of(),
+                Map.of(),
                 new RateLimitPolicy(60, 600, 20, 50),
                 new BudgetPolicy(500_000L),
                 true,
@@ -217,6 +277,144 @@ class MvpUnitTests {
             String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
             assertThat(sql).contains("UPDATE virtual_api_key SET enabled = 0", "DROP TABLE application", "DROP COLUMN application_id", "granted_models");
         }
+    }
+
+    @Test
+    void testRunnerMigrationSeparatesTemporaryKeysAndRequestRuns() throws Exception {
+        try (InputStream input = getClass().getResourceAsStream("/db/migration/V8__test_runner_observability.sql")) {
+            assertThat(input).isNotNull();
+            String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(sql).contains("key_kind", "test_run_id", "idx_ai_request_test_run");
+        }
+    }
+
+    @Test
+    void testRunnerAutoStartRequiresObservabilityToBeEnabled() {
+        TestRunnerProcessManager manager = new TestRunnerProcessManager(
+                false,
+                true,
+                "build/does-not-exist/test-runner.jar",
+                19090);
+
+        manager.start();
+
+        assertThat(manager.isRunning()).isTrue();
+        manager.stop();
+        assertThat(manager.isRunning()).isFalse();
+    }
+
+    @Test
+    void testRunnerRejectsInvalidLoopbackPorts() {
+        assertThat(TestRunnerProcessManager.isLoopbackPortAvailable(0)).isFalse();
+        assertThat(TestRunnerProcessManager.isLoopbackPortAvailable(65_536)).isFalse();
+    }
+
+    @Test
+    void periodicModelEntitlementMigrationDefinesGrantUsageAndLegacyDailyConversion() throws Exception {
+        try (InputStream input = getClass().getResourceAsStream("/db/migration/V7__model_periodic_entitlements.sql")) {
+            assertThat(input).isNotNull();
+            String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(sql).contains("model_entitlement_grant", "model_entitlement_usage", "'DAILY'", "Migrated from legacy token balances");
+        }
+    }
+
+    @Test
+    void currentStateEntitlementMigrationRemovesHistoricalGrantsAndCascadesUsage() throws Exception {
+        try (InputStream input = getClass().getResourceAsStream("/db/migration/V9__make_model_entitlements_current_state.sql")) {
+            assertThat(input).isNotNull();
+            String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(sql).contains("'SUPERSEDED'", "'REVOKED'", "FOREIGN KEY (grant_id)", "ON DELETE CASCADE");
+        }
+    }
+
+    @Test
+    void existingEntitlementIsUpdatedInPlaceAndRevocationDeletesIt() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate(List.of(42L));
+        ModelEntitlementRepository repository = new ModelEntitlementRepository(jdbcTemplate);
+        UpsertModelEntitlementRequest request = new UpsertModelEntitlementRequest("DAILY", 100L, "adjusted", null);
+
+        ModelEntitlementItem item = repository.upsertTeam(1L, "mock-gpt-4o-mini", request);
+        List<Long> deleted = repository.revokeTeam(1L, "mock-gpt-4o-mini");
+
+        assertThat(item.grantId()).isEqualTo(42L);
+        assertThat(deleted).containsExactly(42L);
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("UPDATE model_entitlement_grant SET quota_mode"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("DELETE FROM model_entitlement_grant"));
+        assertThat(jdbcTemplate.updates).noneMatch(call -> call.sql().contains("SUPERSEDED"));
+        assertThat(jdbcTemplate.updates).noneMatch(call -> call.sql().startsWith("INSERT INTO model_entitlement_grant"));
+    }
+
+    @Test
+    void periodicQuotaCycleUsesShanghaiDailyAndMondayWeeklyBoundaries() {
+        assertThat(ModelEntitlementRepository.cycleStart(QuotaMode.DAILY)).contains("T00:00");
+        assertThat(ModelEntitlementRepository.cycleStart(QuotaMode.WEEKLY)).contains("T00:00");
+    }
+
+    @Test
+    void entitlementQuotaLimitsKeepMemberAndTeamRangesSeparate() {
+        EntitlementQuotaLimits.validateMember(QuotaMode.WEEKLY, EntitlementQuotaLimits.MEMBER_MAX_TOKENS);
+        EntitlementQuotaLimits.validateTeam(QuotaMode.WEEKLY, EntitlementQuotaLimits.TEAM_MAX_TOKENS);
+        EntitlementQuotaLimits.validateMember(QuotaMode.UNLIMITED, null);
+
+        assertThatThrownBy(() -> EntitlementQuotaLimits.validateMember(QuotaMode.DAILY, EntitlementQuotaLimits.MEMBER_MAX_TOKENS + 1))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("Member periodic quota");
+        assertThatThrownBy(() -> EntitlementQuotaLimits.validateTeam(QuotaMode.DAILY, EntitlementQuotaLimits.TEAM_MAX_TOKENS + 1))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("Team periodic quota");
+        assertThatThrownBy(() -> EntitlementQuotaLimits.validateTeam(QuotaMode.UNLIMITED, 1L))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("UNLIMITED");
+    }
+
+    @Test
+    void platformQuotaSummaryOnlyReadsActiveTeamGrantsFromEnabledTeams() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+
+        ModelEntitlementRepository repository = new ModelEntitlementRepository(jdbcTemplate);
+        assertThat(repository.platformQuotaSummary().items()).isEmpty();
+
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("JOIN team t ON t.id = meg.team_id"));
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("meg.member_id IS NULL") && sql.contains("meg.status = 'ACTIVE'") && sql.contains("t.enabled = 1"));
+    }
+
+    @Test
+    void memberRemovalDisablesKeysAndClearsOnlyCurrentAccessState() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate(List.of(31L, 32L));
+        TeamEntitlementRepository repository = new TeamEntitlementRepository(jdbcTemplate);
+
+        TeamEntitlementRepository.MemberDeactivation removed = repository.deactivateMember(2L, 7L, 10L);
+
+        assertThat(removed.memberId()).isEqualTo(7L);
+        assertThat(removed.entitlementGrantIds()).containsExactly(31L, 32L);
+        assertThat(removed.keyHashes()).containsExactly("key-hash-1");
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("UPDATE model_entitlement_grant SET status = 'REVOKED'"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("DELETE FROM member_model_access"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("UPDATE virtual_api_key SET enabled = 0"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("UPDATE team_member SET enabled = 0"));
+        assertThat(jdbcTemplate.updates).noneMatch(call -> call.sql().contains("DELETE FROM model_entitlement_grant") || call.sql().contains("DELETE FROM model_entitlement_usage") || call.sql().contains("DELETE FROM usage_record") || call.sql().contains("DELETE FROM billing_record"));
+    }
+
+    @Test
+    void memberRemovalRejectsTheCurrentOwner() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate(List.of(), "OWNER", 1);
+        TeamEntitlementRepository repository = new TeamEntitlementRepository(jdbcTemplate);
+
+        assertThatThrownBy(() -> repository.deactivateMember(2L, 7L, null))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("Transfer team ownership");
+        assertThat(jdbcTemplate.updates).isEmpty();
+    }
+
+    @Test
+    void ownerScopedMemberRemovalRequiresAnActiveOwnerOfThatTeam() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate(List.of(), "MEMBER", 0);
+        TeamEntitlementRepository repository = new TeamEntitlementRepository(jdbcTemplate);
+
+        assertThatThrownBy(() -> repository.deactivateMember(2L, 7L, 10L))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("active team owner");
+        assertThat(jdbcTemplate.updates).isEmpty();
     }
 
     @Test
@@ -319,6 +517,23 @@ class MvpUnitTests {
     private static final class RecordingJdbcTemplate extends JdbcTemplate {
         private final List<SqlCall> updates = new ArrayList<>();
         private final List<String> queries = new ArrayList<>();
+        private final List<Long> activeEntitlementGrantIds;
+        private final String memberRole;
+        private final int ownerScopeCount;
+
+        private RecordingJdbcTemplate() {
+            this(List.of(), "MEMBER", 1);
+        }
+
+        private RecordingJdbcTemplate(List<Long> activeEntitlementGrantIds) {
+            this(activeEntitlementGrantIds, "MEMBER", 1);
+        }
+
+        private RecordingJdbcTemplate(List<Long> activeEntitlementGrantIds, String memberRole, int ownerScopeCount) {
+            this.activeEntitlementGrantIds = activeEntitlementGrantIds;
+            this.memberRole = memberRole;
+            this.ownerScopeCount = ownerScopeCount;
+        }
 
         @Override
         public int update(String sql, Object... args) {
@@ -330,7 +545,13 @@ class MvpUnitTests {
         public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
             queries.add(sql);
             if (requiredType == Long.class) {
+                if (sql.contains("quota_mode <>")) return requiredType.cast(0L);
+                if (sql.contains("COALESCE(SUM")) return requiredType.cast(0L);
                 return requiredType.cast(1L);
+            }
+            if (requiredType == Integer.class) {
+                if (sql.contains("m.user_id = t.owner_user_id") && sql.contains("m.role = 'OWNER'")) return requiredType.cast(ownerScopeCount);
+                return requiredType.cast(1);
             }
             throw new IllegalArgumentException("Unexpected result type: " + requiredType.getName());
         }
@@ -339,9 +560,15 @@ class MvpUnitTests {
         @SuppressWarnings("unchecked")
         public <T> T queryForObject(String sql, RowMapper<T> rowMapper, Object... args) {
             queries.add(sql);
+            if (sql.contains("FROM team_member WHERE id=? AND team_id=? AND enabled=1")) {
+                return (T) new com.modelgate.common.api.AdminDtos.TeamMemberItem(7L, 1L, 2L, "Demo Developer", "developer@example.com", memberRole, true, OffsetDateTime.now());
+            }
             if (sql.contains("FROM platform_user u")) {
                 return (T) new UserItem(4L, "Demo User", "demo@example.com", true,
                         1L, 2L, "Demo Team", "MEMBER", OffsetDateTime.now());
+            }
+            if (sql.contains("SELECT consumed_tokens, frozen_tokens FROM model_entitlement_usage")) {
+                throw new EmptyResultDataAccessException(1);
             }
             return null;
         }
@@ -354,11 +581,28 @@ class MvpUnitTests {
             if (elementType == Long.class && sql.contains("SELECT id FROM quota_account")) {
                 return List.of(elementType.cast(7L));
             }
+            if (elementType == Long.class && sql.contains("SELECT id FROM model_entitlement_grant")) {
+                return List.of(elementType.cast(31L));
+            }
             throw new IllegalArgumentException("Unexpected query: " + sql);
         }
 
         @Override
+        @SuppressWarnings("unchecked")
         public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+            queries.add(sql);
+            if (sql.startsWith("SELECT id FROM model_entitlement_grant")) {
+                return (List<T>) activeEntitlementGrantIds;
+            }
+            if (sql.startsWith("SELECT id, team_id, member_id, model_name")) {
+                return List.of((T) new ModelEntitlementItem(42L, 1L, null, "mock-gpt-4o-mini", "DAILY", 100L,
+                        "ACTIVE", 0L, 0L, 100L, OffsetDateTime.now(), "adjusted", OffsetDateTime.now(), null));
+            }
+            return List.of();
+        }
+
+        @Override
+        public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
             queries.add(sql);
             return List.of();
         }

@@ -145,3 +145,19 @@ curl -N -X POST http://localhost:8080/v1/chat/completions \
 ```bash
 curl http://localhost:8080/admin/teams/1/quota
 ```
+
+## 启动多开发者 Mock 测试工具
+
+仅在开发环境打开测试观察契约：
+
+```bash
+# Runner 保持独立可执行工程；修改其代码后先构建一次。
+mvn -f tools/modelgate-test-runner/pom.xml package
+export MODELGATE_TEST_OBSERVABILITY_ENABLED='true'
+export MODELGATE_TEST_RUNNER_AUTO_START='true'
+mvn -pl modelgate-bootstrap spring-boot:run
+```
+
+网关会以独立子进程启动 Runner，并在网关正常停止时回收它。打开控制台侧边栏“开发测试工具”，或访问 `http://127.0.0.1:19090`。Runner 只列出满足当前 Mock 模型授权和个人额度条件的开发成员；可手动勾选或自动选择多名成员。它只发送 Mock 请求，短期测试 Key 会在测试结束、取消或 30 分钟到期时失效。
+
+`MODELGATE_TEST_RUNNER_AUTO_START` 默认为 `false`，生产环境不应开启。若已手动运行 Runner，网关发现 `127.0.0.1:19090` 已被占用后会跳过启动，并且不会管理该外部进程。可用 `MODELGATE_TEST_RUNNER_JAR_PATH` 和 `MODELGATE_TEST_RUNNER_PORT` 覆盖 Jar 路径及端口；修改端口时，也要将控制台的 `VITE_TEST_TOOL_URL` 设为对应地址。

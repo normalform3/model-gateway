@@ -30,14 +30,18 @@ public class UserRepository {
                 SELECT u.id, u.name, u.email, u.enabled, u.created_at,
                        m.id member_id, m.team_id, t.name team_name, m.role
                 FROM platform_user u
-                LEFT JOIN team_member m ON m.user_id = u.id
-                LEFT JOIN team t ON t.id = m.team_id
+                LEFT JOIN team_member m ON m.user_id = u.id AND m.enabled = 1
+                LEFT JOIN team t ON t.id = m.team_id AND t.enabled = 1
                 WHERE 1 = 1
                 """);
         List<Object> args = new ArrayList<>();
         if (role != null && !role.isBlank()) {
-            sql.append(" AND m.role = ?");
-            args.add(normalizeRole(role));
+            if ("DEVELOPER".equalsIgnoreCase(role)) {
+                sql.append(" AND m.role IN ('OWNER', 'MEMBER')");
+            } else {
+                sql.append(" AND m.role = ?");
+                args.add(normalizeRole(role));
+            }
         }
         if (enabledOnly) {
             sql.append(" AND u.enabled = 1");
@@ -72,7 +76,8 @@ public class UserRepository {
                     """, request.name(), blankLower(request.email()), request.enabled() == null ? null : bool(request.enabled(), true), now(), userId);
             if (changed == 0) throw badRequest("User was not found.");
             UserItem user = require(userId);
-            jdbcTemplate.update("UPDATE team_member SET name = ?, email = ?, enabled = ? WHERE user_id = ?",
+            // Re-enabling a global user must not silently restore a membership that a team owner removed.
+            jdbcTemplate.update("UPDATE team_member SET name = ?, email = ?, enabled = CASE WHEN ? = 0 THEN 0 ELSE enabled END WHERE user_id = ?",
                     user.name(), user.email(), bool(user.enabled(), true), userId);
             return require(userId);
         } catch (DuplicateKeyException ex) {
@@ -143,13 +148,34 @@ public class UserRepository {
         return new DeletedTeam(apiKeyHashes, quotaAccountIds);
     }
 
+    /** Stops a team while retaining its operational ledger for audit and reporting. */
+    @Transactional
+    public DissolvedTeam dissolveTeam(long teamId) {
+        Long found = lookupLong("SELECT id FROM team WHERE id = ?", teamId);
+        if (found == null) throw badRequest("Team was not found.");
+        List<String> apiKeyHashes = jdbcTemplate.queryForList("SELECT key_hash FROM virtual_api_key WHERE team_id = ?", String.class, teamId);
+        List<Long> quotaAccountIds = jdbcTemplate.queryForList("""
+                SELECT id FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?
+                UNION ALL
+                SELECT qa.id FROM quota_account qa
+                JOIN team_member m ON m.id = qa.owner_id
+                WHERE qa.account_type = 'MEMBER' AND m.team_id = ?
+                """, Long.class, teamId, teamId);
+        List<Long> entitlementGrantIds = jdbcTemplate.queryForList(
+                "SELECT id FROM model_entitlement_grant WHERE team_id = ?", Long.class, teamId);
+        jdbcTemplate.update("UPDATE virtual_api_key SET enabled = 0 WHERE team_id = ?", teamId);
+        jdbcTemplate.update("UPDATE team_member SET enabled = 0 WHERE team_id = ?", teamId);
+        jdbcTemplate.update("UPDATE team SET enabled = 0, status = 'DISSOLVED' WHERE id = ?", teamId);
+        return new DissolvedTeam(apiKeyHashes, quotaAccountIds, entitlementGrantIds);
+    }
+
     private UserItem require(long userId) {
         try {
             return jdbcTemplate.queryForObject("""
                     SELECT u.id, u.name, u.email, u.enabled, u.created_at,
                       m.id member_id, m.team_id, t.name team_name, m.role
-                    FROM platform_user u LEFT JOIN team_member m ON m.user_id = u.id
-                    LEFT JOIN team t ON t.id = m.team_id WHERE u.id = ?
+                    FROM platform_user u LEFT JOIN team_member m ON m.user_id = u.id AND m.enabled = 1
+                    LEFT JOIN team t ON t.id = m.team_id AND t.enabled = 1 WHERE u.id = ?
                     """, (rs, rowNum) -> new UserItem(rs.getLong("id"), rs.getString("name"), rs.getString("email"),
                     rs.getInt("enabled") == 1, nullableLong(rs.getObject("member_id")), nullableLong(rs.getObject("team_id")),
                     rs.getString("team_name"), rs.getString("role"), JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at"))), userId);
@@ -208,4 +234,5 @@ public class UserRepository {
 
     public record DeletedUser(List<String> apiKeyHashes) { }
     public record DeletedTeam(List<String> apiKeyHashes, List<Long> quotaAccountIds) { }
+    public record DissolvedTeam(List<String> apiKeyHashes, List<Long> quotaAccountIds, List<Long> entitlementGrantIds) { }
 }
