@@ -14,7 +14,6 @@ public final class AdminDtos {
     public record BootstrapDemoResponse(
             long organizationId,
             long teamId,
-            long applicationId,
             long quotaAccountId,
             String logicalModel
     ) {
@@ -58,16 +57,6 @@ public final class AdminDtos {
     public record TeamMembershipRequest(@NotNull Long teamId, @NotBlank String role) {
     }
 
-    public record CreateApiKeyRequest(
-            @NotNull Long organizationId,
-            @NotNull Long teamId,
-            @NotNull Long applicationId,
-            @NotBlank String name,
-            List<String> allowedModels,
-            OffsetDateTime expiresAt
-    ) {
-    }
-
     public record CreateApiKeyResponse(
             long keyId,
             String keyPrefix,
@@ -103,7 +92,6 @@ public final class AdminDtos {
     public record TeamSummary(
             long teamId,
             long organizationId,
-            long defaultApplicationId,
             String name,
             String status,
             boolean enabled,
@@ -152,15 +140,6 @@ public final class AdminDtos {
     }
 
     public record TeamMemberListResponse(List<TeamMemberItem> items) {
-    }
-
-    public record CreateMemberApiKeyRequest(
-            @NotNull Long applicationId,
-            @NotBlank String name,
-            List<String> allowedModels,
-            OffsetDateTime expiresAt,
-            Long createdByMemberId
-    ) {
     }
 
     public record DisableApiKeyResponse(long keyId, boolean enabled) {
@@ -313,15 +292,6 @@ public final class AdminDtos {
     public record UpsertRouteTargetRequest(long deploymentId, Integer weight, Boolean enabled) {
     }
 
-    public record ApplicationItem(long applicationId, long organizationId, long teamId, String name, OffsetDateTime createdAt) {
-    }
-
-    public record ApplicationListResponse(List<ApplicationItem> items) {
-    }
-
-    public record CreateApplicationRequest(@NotBlank String name) {
-    }
-
     public record TeamModelAccessResponse(long teamId, List<String> logicalModels) {
     }
 
@@ -337,7 +307,21 @@ public final class AdminDtos {
     ) {
     }
 
-    public record ReviewTeamEntitlementRequest(@NotBlank String decision, String reviewerNote) {
+    public record GrantTeamEntitlementRequest(
+            List<String> modelNames,
+            @NotNull Long tokenAllocation,
+            String reason,
+            OffsetDateTime expiresAt
+    ) {
+    }
+
+    public record ReviewTeamEntitlementRequest(
+            @NotBlank String decision,
+            List<String> grantedModelNames,
+            Long grantedTokens,
+            OffsetDateTime grantedExpiresAt,
+            String reviewerNote
+    ) {
     }
 
     public record TeamEntitlementItem(
@@ -346,6 +330,8 @@ public final class AdminDtos {
             long ownerMemberId,
             List<String> modelNames,
             long requestedTokens,
+            List<String> grantedModelNames,
+            Long grantedTokens,
             String purpose,
             OffsetDateTime expiresAt,
             String status,
@@ -360,7 +346,6 @@ public final class AdminDtos {
 
     public record GrantMemberAccessRequest(
             @NotNull Long ownerMemberId,
-            @NotNull Long applicationId,
             List<String> modelNames,
             @NotNull Long tokenAllocation,
             String reason
@@ -371,18 +356,14 @@ public final class AdminDtos {
             long memberId,
             long quotaAccountId,
             long availableTokens,
-            List<String> modelNames,
-            Long keyId,
-            String keyPrefix,
-            String apiKey
+            List<String> modelNames
     ) {
     }
 
     public record RevokeMemberModelAccessRequest(@NotNull Long ownerMemberId) {
     }
 
-    public record RotateMemberKeyRequest(@NotNull Long ownerMemberId) {
-    }
+    public record MemberKeyStatusResponse(Long keyId, String keyPrefix, boolean enabled, boolean reissueRequired, OffsetDateTime createdAt) { }
 
     public record VirtualApiKeyItem(
             long keyId,
@@ -390,8 +371,6 @@ public final class AdminDtos {
             String keyPrefix,
             long teamId,
             String teamName,
-            long applicationId,
-            String applicationName,
             Long ownerMemberId,
             String ownerMemberName,
             List<String> allowedModels,

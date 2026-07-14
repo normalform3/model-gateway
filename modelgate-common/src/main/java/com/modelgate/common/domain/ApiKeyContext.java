@@ -7,7 +7,6 @@ public record ApiKeyContext(
         long keyId,
         long organizationId,
         long teamId,
-        long applicationId,
         Long memberId,
         long quotaAccountId,
         Set<String> allowedModels,

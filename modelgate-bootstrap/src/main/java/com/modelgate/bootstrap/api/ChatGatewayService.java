@@ -229,7 +229,6 @@ public class ChatGatewayService {
                 requestId,
                 apiKey.organizationId(),
                 apiKey.teamId(),
-                apiKey.applicationId(),
                 apiKey.memberId(),
                 apiKey.keyId(),
                 target.provider(),
@@ -246,7 +245,7 @@ public class ChatGatewayService {
         if (idempotencyKey == null || idempotencyKey.isBlank()) {
             return;
         }
-        String key = "idempotency:" + apiKey.applicationId() + ":" + idempotencyKey;
+        String key = "idempotency:" + apiKey.keyId() + ":" + idempotencyKey;
         Boolean ok = redisTemplate.opsForValue().setIfAbsent(key, "STARTED", Duration.ofHours(24));
         if (Boolean.FALSE.equals(ok)) {
             throw new ModelGateException(ErrorCode.IDEMPOTENCY_CONFLICT);

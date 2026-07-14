@@ -127,7 +127,7 @@ class MvpUnitTests {
         assertThat(deletedTeam.apiKeyHashes()).containsExactly("key-hash-1");
         assertThat(deletedTeam.quotaAccountIds()).containsExactly(7L);
         assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("DELETE FROM virtual_api_key WHERE team_id"));
-        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("DELETE FROM application WHERE team_id"));
+        assertThat(jdbcTemplate.updates).noneMatch(call -> call.sql().contains("DELETE FROM application WHERE team_id"));
         assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("DELETE FROM team_member WHERE team_id"));
         assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("DELETE FROM team WHERE id"));
         assertThat(jdbcTemplate.updates).noneMatch(call -> call.sql().contains("DELETE FROM platform_user"));
@@ -137,7 +137,7 @@ class MvpUnitTests {
     void virtualKeyCountQueryUsesTheOuterFromClause() {
         RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
 
-        new AdminControlRepository(jdbcTemplate).listKeys(null, null, null, null, null, null, 0, 20);
+        new AdminControlRepository(jdbcTemplate).listKeys(null, null, null, null, null, 0, 20);
 
         assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("SELECT COUNT(*) FROM virtual_api_key k"));
         assertThat(jdbcTemplate.queries).noneMatch(sql -> sql.startsWith("SELECT COUNT(*) FROM member_model_access"));
@@ -172,7 +172,6 @@ class MvpUnitTests {
                 10L,
                 1L,
                 2L,
-                3L,
                 4L,
                 5L,
                 Set.of("smart-chat"),
@@ -195,7 +194,7 @@ class MvpUnitTests {
 
     @Test
     void memberAccessContractCarriesOwnerScopeAndAllocation() {
-        GrantMemberAccessRequest request = new GrantMemberAccessRequest(10L, 100L, List.of("mock-gpt-4o-mini"), 60_000L, "developer workspace");
+        GrantMemberAccessRequest request = new GrantMemberAccessRequest(10L, List.of("mock-gpt-4o-mini"), 60_000L, "developer workspace");
 
         assertThat(request.ownerMemberId()).isEqualTo(10L);
         assertThat(request.tokenAllocation()).isEqualTo(60_000L);
@@ -212,13 +211,21 @@ class MvpUnitTests {
     }
 
     @Test
+    void applicationRemovalMigrationDisablesLegacyKeysAndRemovesApplicationColumns() throws Exception {
+        try (InputStream input = getClass().getResourceAsStream("/db/migration/V6__remove_applications_and_add_entitlement_grants.sql")) {
+            assertThat(input).isNotNull();
+            String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(sql).contains("UPDATE virtual_api_key SET enabled = 0", "DROP TABLE application", "DROP COLUMN application_id", "granted_models");
+        }
+    }
+
+    @Test
     void usageEventCanCarryMemberAttribution() {
         UsageReportedEvent event = new UsageReportedEvent(
                 "evt-test",
                 "req-test",
                 1L,
                 2L,
-                3L,
                 4L,
                 10L,
                 "mock",

@@ -32,7 +32,6 @@ auth:key:{keyHash}
 {
   "keyId": 1001,
   "teamId": 10,
-  "applicationId": 20,
   "enabled": true,
   "allowedModels": ["gpt-4o"],
   "expireAt": 1783670400
@@ -46,7 +45,6 @@ auth:key:{keyHash}
 需要检查：
 
 - 虚拟 Key RPM
-- 应用 RPM
 - 团队 RPM
 - 企业 RPM
 - 用户或团队 TPM
@@ -150,7 +148,6 @@ REQUEST_CANCELLED
   "requestId": "req_example_001",
   "organizationId": 1,
   "teamId": 10,
-  "applicationId": 100,
   "apiKeyId": 1000,
   "provider": "mock",
   "model": "mock-chat",

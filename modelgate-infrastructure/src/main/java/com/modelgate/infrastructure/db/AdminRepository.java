@@ -3,8 +3,6 @@ package com.modelgate.infrastructure.db;
 import com.modelgate.common.api.AdminDtos.BootstrapDemoResponse;
 import com.modelgate.common.api.AdminDtos.DemoIdentity;
 import com.modelgate.common.api.AdminDtos.DemoIdentityResponse;
-import com.modelgate.common.api.AdminDtos.CreateMemberApiKeyRequest;
-import com.modelgate.common.api.AdminDtos.CreateApiKeyRequest;
 import com.modelgate.common.api.AdminDtos.CreateTeamMemberRequest;
 import com.modelgate.common.api.AdminDtos.CreateTeamRequest;
 import com.modelgate.common.api.AdminDtos.RequestLogItem;
@@ -86,10 +84,6 @@ public class AdminRepository {
                 orgId, teamId, developerUserId, "Demo Developer", DEMO_DEVELOPER_EMAIL, "MEMBER", 1, JdbcTime.toTimestamp(now));
         jdbcTemplate.update("UPDATE team SET owner_user_id = ? WHERE id = ?", ownerUserId, teamId);
 
-        jdbcTemplate.update("INSERT IGNORE INTO application(organization_id, team_id, name, created_at) VALUES (?, ?, ?, ?)",
-                orgId, teamId, "CodeReader Demo", JdbcTime.toTimestamp(now));
-        long appId = requireId("SELECT id FROM application WHERE team_id = ? AND name = ?", teamId, "CodeReader Demo");
-
         jdbcTemplate.update("INSERT IGNORE INTO provider(name, provider_type, enabled, created_at) VALUES (?, ?, ?, ?)",
                 "Mock ChatGPT API", "MOCK_OPENAI", 1, JdbcTime.toTimestamp(now));
         long providerId = requireId("SELECT id FROM provider WHERE name = ?", "Mock ChatGPT API");
@@ -129,7 +123,7 @@ public class AdminRepository {
                 "TEAM", teamId, 500_000L, 0L, 0L, 0L, JdbcTime.toTimestamp(now));
         long quotaAccountId = requireId("SELECT id FROM quota_account WHERE account_type = ? AND owner_id = ?", "TEAM", teamId);
 
-        return new BootstrapDemoResponse(orgId, teamId, appId, quotaAccountId, "mock-gpt-4o-mini");
+        return new BootstrapDemoResponse(orgId, teamId, quotaAccountId, "mock-gpt-4o-mini");
     }
 
     public DemoIdentityResponse demoIdentities() {
@@ -164,75 +158,22 @@ public class AdminRepository {
         ));
     }
 
-    public long insertApiKey(CreateApiKeyRequest request, String keyPrefix, String keyHash) {
-        String allowedModels = String.join(",", safeAllowedModels(request.allowedModels()));
-        return GeneratedKeys.insert(jdbcTemplate, """
-                        INSERT INTO virtual_api_key(
-                            organization_id, team_id, application_id, name, key_prefix, key_hash, allowed_models, enabled, expires_at, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                request.organizationId(),
-                request.teamId(),
-                request.applicationId(),
-                request.name(),
-                keyPrefix,
-                keyHash,
-                allowedModels,
-                1,
-                JdbcTime.toTimestamp(request.expiresAt()),
-                JdbcTime.toTimestamp(OffsetDateTime.now()));
-    }
-
-    public long insertMemberApiKey(
-            long teamId,
-            long ownerMemberId,
-            CreateMemberApiKeyRequest request,
-            String keyPrefix,
-            String keyHash
-    ) {
-        MemberKeyScope scope = findMemberKeyScope(teamId, ownerMemberId, request.applicationId());
-        Long createdByMemberId = request.createdByMemberId() == null ? findOwnerMemberId(teamId) : request.createdByMemberId();
-        if (createdByMemberId != null && !memberBelongsToTeam(teamId, createdByMemberId)) {
-            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "createdByMemberId does not belong to this team.");
-        }
-        String allowedModels = String.join(",", safeAllowedModels(request.allowedModels()));
-        return GeneratedKeys.insert(jdbcTemplate, """
-                        INSERT INTO virtual_api_key(
-                            organization_id, team_id, application_id, owner_member_id, created_by_member_id,
-                            name, key_prefix, key_hash, allowed_models, enabled, expires_at, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                scope.organizationId(),
-                scope.teamId(),
-                scope.applicationId(),
-                ownerMemberId,
-                createdByMemberId,
-                request.name(),
-                keyPrefix,
-                keyHash,
-                allowedModels,
-                1,
-                JdbcTime.toTimestamp(request.expiresAt()),
-                JdbcTime.toTimestamp(OffsetDateTime.now()));
-    }
-
-    public long insertSystemMemberApiKey(long teamId, long ownerMemberId, long applicationId, String keyPrefix, String keyHash) {
-        MemberKeyScope scope = findMemberKeyScope(teamId, ownerMemberId, applicationId);
+    public long insertSystemMemberApiKey(long teamId, long ownerMemberId, String keyPrefix, String keyHash) {
+        MemberKeyScope scope = findMemberKeyScope(teamId, ownerMemberId);
         return GeneratedKeys.insert(jdbcTemplate, """
                 INSERT INTO virtual_api_key(
-                    organization_id, team_id, application_id, owner_member_id,
-                    name, key_prefix, key_hash, allowed_models, enabled, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, '', 1, ?)
-                """, scope.organizationId(), scope.teamId(), scope.applicationId(), ownerMemberId,
-                "member-" + ownerMemberId + "-app-" + applicationId, keyPrefix, keyHash, JdbcTime.toTimestamp(OffsetDateTime.now()));
+                    organization_id, team_id, owner_member_id, name, key_prefix, key_hash, enabled, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                """, scope.organizationId(), scope.teamId(), ownerMemberId,
+                "member-" + ownerMemberId, keyPrefix, keyHash, JdbcTime.toTimestamp(OffsetDateTime.now()));
     }
 
-    public Optional<Long> findActiveMemberKeyId(long teamId, long memberId, long applicationId) {
+    public Optional<Long> findActiveMemberKeyId(long teamId, long memberId) {
         try {
             return Optional.ofNullable(jdbcTemplate.queryForObject("""
-                    SELECT id FROM virtual_api_key WHERE team_id = ? AND owner_member_id = ? AND application_id = ? AND enabled = 1
+                    SELECT id FROM virtual_api_key WHERE team_id = ? AND owner_member_id = ? AND enabled = 1
                     ORDER BY id DESC LIMIT 1
-                    """, Long.class, teamId, memberId, applicationId));
+                    """, Long.class, teamId, memberId));
         } catch (EmptyResultDataAccessException ex) { return Optional.empty(); }
     }
 
@@ -450,7 +391,6 @@ public class AdminRepository {
                                 k.id key_id,
                                 k.organization_id,
                                 k.team_id,
-                                k.application_id,
                                 k.owner_member_id,
                                 q.id quota_account_id,
                                 COALESCE((SELECT GROUP_CONCAT(mma.model_name ORDER BY mma.model_name SEPARATOR ',')
@@ -477,7 +417,6 @@ public class AdminRepository {
                             rs.getLong("key_id"),
                             rs.getLong("organization_id"),
                             rs.getLong("team_id"),
-                            rs.getLong("application_id"),
                             nullableLong(rs.getObject("owner_member_id")),
                             rs.getLong("quota_account_id"),
                             splitAllowedModels(rs.getString("allowed_models")),
@@ -496,41 +435,11 @@ public class AdminRepository {
         }
     }
 
-    public RequestLogResponse findRequestsByApplication(long applicationId, int limit) {
-        List<RequestLogItem> items = jdbcTemplate.query("""
-                        SELECT r.request_id, r.member_id, m.name member_name, r.requested_model,
-                               r.actual_provider, r.actual_model, r.status, r.input_tokens, r.output_tokens,
-                               r.duration_ms, r.first_token_ms, r.created_at
-                        FROM ai_request r
-                        LEFT JOIN team_member m ON m.id = r.member_id
-                        WHERE r.application_id = ?
-                        ORDER BY r.created_at DESC
-                        LIMIT ?
-                        """,
-                (rs, rowNum) -> new RequestLogItem(
-                        rs.getString("request_id"),
-                        nullableLong(rs.getObject("member_id")),
-                        rs.getString("member_name"),
-                        rs.getString("requested_model"),
-                        rs.getString("actual_provider"),
-                        rs.getString("actual_model"),
-                        rs.getString("status"),
-                        rs.getInt("input_tokens"),
-                        rs.getInt("output_tokens"),
-                        rs.getLong("duration_ms"),
-                        nullableLong(rs.getObject("first_token_ms")),
-                        JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at"))),
-                applicationId,
-                limit);
-        return new RequestLogResponse(items, null);
-    }
-
     private String teamSummarySql(String whereClause) {
         return """
                 SELECT
                     t.id team_id,
                     t.organization_id,
-                    COALESCE((SELECT a.id FROM application a WHERE a.team_id = t.id ORDER BY a.id ASC LIMIT 1), 0) default_application_id,
                     t.name,
                     t.status,
                     t.enabled,
@@ -552,7 +461,6 @@ public class AdminRepository {
         return new TeamSummary(
                 rs.getLong("team_id"),
                 rs.getLong("organization_id"),
-                rs.getLong("default_application_id"),
                 rs.getString("name"),
                 rs.getString("status"),
                 rs.getInt("enabled") == 1,
@@ -594,23 +502,18 @@ public class AdminRepository {
         }
     }
 
-    private MemberKeyScope findMemberKeyScope(long teamId, long ownerMemberId, long applicationId) {
+    private MemberKeyScope findMemberKeyScope(long teamId, long ownerMemberId) {
         try {
             return jdbcTemplate.queryForObject("""
-                            SELECT m.organization_id, m.team_id, a.id application_id
+                            SELECT m.organization_id, m.team_id
                             FROM team_member m
-                            JOIN application a ON a.team_id = m.team_id
-                            WHERE m.team_id = ? AND m.id = ? AND m.enabled = 1 AND a.id = ?
+                            WHERE m.team_id = ? AND m.id = ? AND m.enabled = 1
                             """,
                     (rs, rowNum) -> new MemberKeyScope(
                             rs.getLong("organization_id"),
-                            rs.getLong("team_id"),
-                            rs.getLong("application_id")),
-                    teamId,
-                    ownerMemberId,
-                    applicationId);
+                            rs.getLong("team_id")), teamId, ownerMemberId);
         } catch (EmptyResultDataAccessException ex) {
-            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Member or application was not found for this team.");
+            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "Member was not found for this team.");
         }
     }
 
@@ -677,13 +580,6 @@ public class AdminRepository {
         return id;
     }
 
-    private static Set<String> safeAllowedModels(List<String> allowedModels) {
-        if (allowedModels == null || allowedModels.isEmpty()) {
-            return Set.of("smart-chat");
-        }
-        return new LinkedHashSet<>(allowedModels);
-    }
-
     private static Set<String> splitAllowedModels(String allowedModels) {
         if (allowedModels == null || allowedModels.isBlank()) {
             return Set.of();
@@ -698,7 +594,7 @@ public class AdminRepository {
         return ((Number) value).longValue();
     }
 
-    private record MemberKeyScope(long organizationId, long teamId, long applicationId) {
+    private record MemberKeyScope(long organizationId, long teamId) {
     }
 
     private record DemoMember(long teamId, String teamName, long memberId, String name, String email, String role) {

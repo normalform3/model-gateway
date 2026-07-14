@@ -1,8 +1,5 @@
 package com.modelgate.infrastructure.db;
 
-import com.modelgate.common.api.AdminDtos.ApplicationItem;
-import com.modelgate.common.api.AdminDtos.ApplicationListResponse;
-import com.modelgate.common.api.AdminDtos.CreateApplicationRequest;
 import com.modelgate.common.api.AdminDtos.DeploymentItem;
 import com.modelgate.common.api.AdminDtos.DeploymentListResponse;
 import com.modelgate.common.api.AdminDtos.DashboardOverview;
@@ -20,6 +17,7 @@ import com.modelgate.common.api.AdminDtos.UpdateProviderRequest;
 import com.modelgate.common.api.AdminDtos.UpsertRouteTargetRequest;
 import com.modelgate.common.api.AdminDtos.VirtualApiKeyItem;
 import com.modelgate.common.api.AdminDtos.VirtualApiKeyListResponse;
+import com.modelgate.common.api.AdminDtos.MemberKeyStatusResponse;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.common.domain.GlobalRuntimePolicy;
@@ -156,23 +154,6 @@ public class AdminControlRepository {
         return findLogicalModel(logicalModel);
     }
 
-    public ApplicationListResponse listApplications(long teamId) {
-        return new ApplicationListResponse(jdbcTemplate.query("""
-                        SELECT id, organization_id, team_id, name, created_at FROM application WHERE team_id = ? ORDER BY id ASC
-                        """, (rs, rowNum) -> new ApplicationItem(rs.getLong("id"), rs.getLong("organization_id"), rs.getLong("team_id"),
-                rs.getString("name"), JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at"))), teamId));
-    }
-
-    public ApplicationItem createApplication(long teamId, CreateApplicationRequest request) {
-        Long organizationId = jdbcTemplate.queryForObject("SELECT organization_id FROM team WHERE id = ?", Long.class, teamId);
-        if (organizationId == null) throw notFound("Team");
-        long id = GeneratedKeys.insert(jdbcTemplate, "INSERT INTO application(organization_id, team_id, name, created_at) VALUES (?, ?, ?, ?)",
-                organizationId, teamId, request.name(), now());
-        return jdbcTemplate.queryForObject("SELECT id, organization_id, team_id, name, created_at FROM application WHERE id = ?",
-                (rs, rowNum) -> new ApplicationItem(rs.getLong("id"), rs.getLong("organization_id"), rs.getLong("team_id"), rs.getString("name"),
-                        JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at"))), id);
-    }
-
     public TeamModelAccessResponse teamModels(long teamId) {
         return new TeamModelAccessResponse(teamId, jdbcTemplate.queryForList(
                 "SELECT model_name FROM team_model_grant WHERE team_id = ? AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY model_name", String.class, teamId));
@@ -203,9 +184,9 @@ public class AdminControlRepository {
         return count != null && count == new LinkedHashSet<>(models).size();
     }
 
-    public VirtualApiKeyListResponse listKeys(String keyword, Long teamId, Long applicationId, Long memberId, Boolean enabled, String expiry, int page, int size) {
+    public VirtualApiKeyListResponse listKeys(String keyword, Long teamId, Long memberId, Boolean enabled, String expiry, int page, int size) {
         String select = """
-                SELECT k.id, k.name, k.key_prefix, k.team_id, t.name team_name, k.application_id, a.name application_name,
+                SELECT k.id, k.name, k.key_prefix, k.team_id, t.name team_name,
                        k.owner_member_id, m.name owner_member_name,
                        COALESCE((SELECT GROUP_CONCAT(mma.model_name ORDER BY mma.model_name SEPARATOR ',')
                                  FROM member_model_access mma
@@ -214,14 +195,13 @@ public class AdminControlRepository {
                        k.enabled, k.expires_at, k.created_at
                 """;
         String from = """
-                FROM virtual_api_key k JOIN team t ON t.id = k.team_id JOIN application a ON a.id = k.application_id
+                FROM virtual_api_key k JOIN team t ON t.id = k.team_id
                 LEFT JOIN team_member m ON m.id = k.owner_member_id
                 """;
         StringBuilder where = new StringBuilder(" WHERE 1 = 1");
         List<Object> args = new ArrayList<>();
         if (keyword != null && !keyword.isBlank()) { where.append(" AND (k.name LIKE ? OR k.key_prefix LIKE ?)"); args.add("%" + keyword.trim() + "%"); args.add("%" + keyword.trim() + "%"); }
         if (teamId != null) { where.append(" AND k.team_id = ?"); args.add(teamId); }
-        if (applicationId != null) { where.append(" AND k.application_id = ?"); args.add(applicationId); }
         if (memberId != null) { where.append(" AND k.owner_member_id = ?"); args.add(memberId); }
         if (enabled != null) { where.append(" AND k.enabled = ?"); args.add(bool(enabled, true)); }
         if ("EXPIRED".equalsIgnoreCase(expiry)) where.append(" AND k.expires_at IS NOT NULL AND k.expires_at < NOW()");
@@ -231,10 +211,14 @@ public class AdminControlRepository {
         List<Object> pageArgs = new ArrayList<>(args); pageArgs.add(size); pageArgs.add(page * size);
         List<VirtualApiKeyItem> items = jdbcTemplate.query(sql, (rs, rowNum) -> new VirtualApiKeyItem(
                 rs.getLong("id"), rs.getString("name"), rs.getString("key_prefix"), rs.getLong("team_id"), rs.getString("team_name"),
-                rs.getLong("application_id"), rs.getString("application_name"), nullableLong(rs.getObject("owner_member_id")),
+                nullableLong(rs.getObject("owner_member_id")),
                 rs.getString("owner_member_name"), split(rs.getString("allowed_models")), rs.getInt("enabled") == 1,
                 JdbcTime.toOffsetDateTime(rs.getTimestamp("expires_at")), JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at"))), pageArgs.toArray());
         return new VirtualApiKeyListResponse(items, page, size, total);
+    }
+
+    public MemberKeyStatusResponse memberKeyStatus(long memberId) {
+        return jdbcTemplate.query("SELECT id, key_prefix, enabled, created_at FROM virtual_api_key WHERE owner_member_id = ? ORDER BY id DESC LIMIT 1", (rs, row) -> new MemberKeyStatusResponse(rs.getLong("id"), rs.getString("key_prefix"), rs.getInt("enabled") == 1, rs.getInt("enabled") == 0, JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at"))), memberId).stream().findFirst().orElse(new MemberKeyStatusResponse(null, null, false, false, null));
     }
 
     public DashboardOverview dashboard() {

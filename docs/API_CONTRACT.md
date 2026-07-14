@@ -95,13 +95,13 @@ MVP 控制面接口可以先面向内部管理后台，不要求完全公开。
 
 - Provider：`keyword`、`providerType`（当前固定为 `MOCK_OPENAI`）、`enabled`。
 - 团队：`keyword`、`enabled`、`logicalModel`。
-- 虚拟 Key：`keyword`、`teamId`、`applicationId`、`memberId`、`enabled`、`expiry`（`ACTIVE` 或 `EXPIRED`）。
+- 虚拟 Key：`keyword`、`teamId`、`memberId`、`enabled`、`expiry`（`ACTIVE` 或 `EXPIRED`）。
 
 ### 用户与开发期视角
 
 `POST /admin/bootstrap/demo` 会幂等创建 Demo Team、`Demo Owner` 和 `Demo Developer`，不创建密码、会话或预置明文 API Key。
 
-`GET/POST /admin/users`、`PATCH/DELETE /admin/users/{userId}` 管理全局用户。删除用户会在同一事务中清理其成员关系、虚拟 Key、用量、账单和额度数据；用户只可属于一个团队。`DELETE /admin/teams/{teamId}` 同样会清理团队的成员关系、应用、Key、调用、账单、额度与授权数据，但保留平台用户。管理员设置团队负责人时只能选择启用、未归属其他团队的现有用户。
+`GET/POST /admin/users`、`PATCH/DELETE /admin/users/{userId}` 管理全局用户。删除用户会在同一事务中清理其成员关系、虚拟 Key、用量、账单和额度数据；用户只可属于一个团队。`DELETE /admin/teams/{teamId}` 同样会清理团队的成员关系、Key、调用、账单、额度与授权数据，但保留平台用户。管理员设置团队负责人时只能选择启用、未归属其他团队的现有用户。
 
 控制台可按角色选择用户：负责人仅请求其所属团队，开发成员仅查看自己的 Key。该选择只影响导航和默认筛选，**不构成登录、鉴权或 RBAC**。
 
@@ -136,7 +136,7 @@ Content-Type: application/json
 GET /admin/teams
 ```
 
-响应包含团队基础信息、负责人、成员数量、Key 数量和 `defaultApplicationId`。
+响应包含团队基础信息、负责人、成员数量和 Key 数量。
 
 ### 设置负责人和管理成员
 
@@ -191,7 +191,6 @@ Content-Type: application/json
 
 ```json
 {
-  "applicationId": 100,
   "ownerMemberId": 10,
   "modelNames": ["gpt-4o"],
   "tokenAllocation": 100000,
@@ -199,9 +198,9 @@ Content-Type: application/json
 }
 ```
 
-模型必须是团队当前获批模型的子集，Token 从团队公共池划拨到成员个人账户。成员首次在该应用获得有效模型权限和正数额度时，系统自动生成一把成员专属 Key，响应只在首次生成时返回明文；已有 Key 时仅更新成员权限和额度。
+模型必须是团队当前获批模型的子集，Token 从团队公共池划拨到成员个人账户。成员权限变更不会生成 Key；开发者在自己的页面确认额度和模型后生成一把成员专属 Key，响应只在生成或轮换当次返回明文。
 
-负责人可调用 `POST /admin/teams/{teamId}/members/{memberId}/applications/{applicationId}/key-rotation` 轮换成员应用 Key；旧 Key 会立即失效，新明文仍只返回一次。
+开发者可调用 `POST /admin/members/{memberId}/api-keys/generate` 生成个人 Key，或调用 `POST /admin/members/{memberId}/api-keys/rotate` 轮换；旧 Key 会立即失效，新明文仍只返回一次。
 
 ### 禁用虚拟 Key
 

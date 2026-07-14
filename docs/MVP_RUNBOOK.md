@@ -44,7 +44,7 @@ npm run dev
 curl -X POST http://localhost:8080/admin/bootstrap/demo
 ```
 
-响应中记录 `organizationId`、`teamId`、`applicationId`。初始化会幂等保留 Demo Team Owner，并创建 Demo Developer；不会生成密码、登录会话或可用明文 Key。
+响应中记录 `organizationId`、`teamId` 和 `quotaAccountId`。初始化会幂等保留 Demo Team Owner，并创建 Demo Developer；不会生成密码、登录会话或可用明文 Key。
 
 前端也会在尚未初始化时显示“初始化演示数据”。初始化后可通过侧边栏切换平台管理员、团队负责人和开发成员。该切换只影响展示和默认筛选，不能用于权限验证；开发环境不得把未受保护的管理接口暴露到公网。
 
@@ -96,7 +96,7 @@ curl -X POST http://localhost:8080/admin/entitlement-requests/1/review \
   -d '{"decision":"APPROVE"}'
 ```
 
-负责人将未分配的平台用户加入团队，创建应用，并向成员划拨模型权限和个人额度：
+负责人将未分配的平台用户加入团队，并向成员划拨模型权限和个人额度：
 
 ```bash
 curl -X POST http://localhost:8080/admin/teams/1/members/from-user \
@@ -105,10 +105,10 @@ curl -X POST http://localhost:8080/admin/teams/1/members/from-user \
 
 curl -X POST http://localhost:8080/admin/teams/1/members/11/access \
   -H 'Content-Type: application/json' \
-  -d '{"ownerMemberId":10,"applicationId":1,"modelNames":["mock-gpt-4o-mini"],"tokenAllocation":100000,"reason":"local development"}'
+  -d '{"ownerMemberId":10,"modelNames":["mock-gpt-4o-mini"],"tokenAllocation":100000,"reason":"local development"}'
 ```
 
-成员首次获得有效权限时，响应里的 `apiKey` 由系统生成且只展示一次。后续额度或模型调整不会再次返回明文。
+成员在自己的 Key 页面生成 Key，响应里的 `apiKey` 只展示一次。后续额度或模型调整不会再次返回明文。
 
 ## 普通调用
 
@@ -143,6 +143,5 @@ curl -N -X POST http://localhost:8080/v1/chat/completions \
 ## 查询
 
 ```bash
-curl http://localhost:8080/admin/applications/1/requests
 curl http://localhost:8080/admin/teams/1/quota
 ```

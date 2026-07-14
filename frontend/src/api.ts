@@ -28,20 +28,20 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
 export interface ProviderSummary { providerId: number; name: string; providerType: string; baseUrl: string | null; enabled: boolean; updatedAt: string }
 export interface ProviderCredential { credentialId: number; providerId: number; name: string; lastFour: string; enabled: boolean; updatedAt: string }
 export interface DirectModel { modelId: number; providerId: number; providerName: string; modelName: string; enabled: boolean; inputPricePerMillion: number; outputPricePerMillion: number; currency: string }
-export interface BootstrapDemoResponse { organizationId: number; teamId: number; applicationId: number; quotaAccountId: number; logicalModel: string }
+export interface BootstrapDemoResponse { organizationId: number; teamId: number; quotaAccountId: number; logicalModel: string }
 export interface DemoIdentity { identityId: string; displayName: string; role: "platform-admin" | "team-admin" | "developer"; teamId: number | null; teamName: string | null; memberId: number | null }
 export interface DemoIdentityResponse { initialized: boolean; identities: DemoIdentity[] }
 export interface PlatformUser { userId: number; name: string; email: string; enabled: boolean; memberId: number | null; teamId: number | null; teamName: string | null; role: "OWNER" | "MEMBER" | null; createdAt: string }
 export interface DeploymentItem { deploymentId: number; providerId: number; name: string; actualModel: string; enabled: boolean; inputPricePerMillion: number; outputPricePerMillion: number; currency: string }
 export interface RouteTargetItem { deploymentId: number; deploymentName: string; providerName: string; weight: number; enabled: boolean }
 export interface LogicalModelItem { logicalModel: string; routeEnabled: boolean; strategy: string; targets: RouteTargetItem[] }
-export interface TeamSummary { teamId: number; organizationId: number; defaultApplicationId: number; name: string; status: "DRAFT" | "READY_FOR_REQUEST" | "ACTIVE" | "SUSPENDED"; enabled: boolean; keyRpm: number; teamRpm: number; teamConcurrency: number; modelConcurrency: number; ownerMemberId: number | null; ownerName: string | null; ownerEmail: string | null; memberCount: number; keyCount: number }
+export interface TeamSummary { teamId: number; organizationId: number; name: string; status: "DRAFT" | "READY_FOR_REQUEST" | "ACTIVE" | "SUSPENDED"; enabled: boolean; keyRpm: number; teamRpm: number; teamConcurrency: number; modelConcurrency: number; ownerMemberId: number | null; ownerName: string | null; ownerEmail: string | null; memberCount: number; keyCount: number }
 export interface TeamMemberItem { memberId: number; teamId: number; name: string; email: string; role: string; enabled: boolean; createdAt: string }
-export interface ApplicationItem { applicationId: number; teamId: number; name: string; createdAt: string }
-export interface VirtualApiKeyItem { keyId: number; name: string; keyPrefix: string; teamId: number; teamName: string; applicationId: number; applicationName: string; ownerMemberId: number | null; ownerMemberName: string | null; allowedModels: string[]; enabled: boolean; expiresAt: string | null; createdAt: string }
+export interface VirtualApiKeyItem { keyId: number; name: string; keyPrefix: string; teamId: number; teamName: string; ownerMemberId: number | null; ownerMemberName: string | null; allowedModels: string[]; enabled: boolean; expiresAt: string | null; createdAt: string }
 export interface CreateApiKeyResponse { keyId: number; keyPrefix: string; apiKey: string; enabled: boolean }
-export interface TeamEntitlement { requestId: number; teamId: number; ownerMemberId: number; modelNames: string[]; requestedTokens: number; purpose: string; expiresAt: string | null; status: "PENDING" | "APPROVED" | "REJECTED"; reviewerNote: string | null; createdAt: string; reviewedAt: string | null }
-export interface MemberAccess { memberId: number; quotaAccountId: number; availableTokens: number; modelNames: string[]; keyId: number | null; keyPrefix: string | null; apiKey: string | null }
+export interface TeamEntitlement { requestId: number; teamId: number; ownerMemberId: number; modelNames: string[]; requestedTokens: number; grantedModelNames: string[]; grantedTokens: number | null; purpose: string; expiresAt: string | null; status: "PENDING" | "APPROVED" | "REJECTED"; reviewerNote: string | null; createdAt: string; reviewedAt: string | null }
+export interface MemberAccess { memberId: number; quotaAccountId: number; availableTokens: number; modelNames: string[] }
+export interface MemberKeyStatus { keyId: number | null; keyPrefix: string | null; enabled: boolean; reissueRequired: boolean; createdAt: string | null }
 export interface QuotaBalance { availableTokens: number; frozenTokens: number; consumedTokens: number; updatedAt: string }
 export interface BillingSummary { scopeId: number; totalTokens: number; totalAmount: number; currency: string; recordCount: number }
 export interface DashboardOverview { enabledProviderCount: number; enabledTeamCount: number; enabledKeyCount: number; requestsLast24Hours: number; successfulRequestsLast24Hours: number; throttledRequestsLast24Hours: number; frozenTokens: number; billingAmountLast24Hours: number; billingCurrency: string; globalRpm: number; globalConcurrency: number }
@@ -82,14 +82,16 @@ export const api = {
   deleteTeam: (teamId: number) => requestJson<void>(`/admin/teams/${teamId}`, { method: "DELETE" }),
   members: (teamId: number) => requestJson<{ items: TeamMemberItem[] }>(`/admin/teams/${teamId}/members`),
   addExistingMember: (teamId: number, ownerMemberId: number, userId: number) => requestJson<TeamMemberItem>(`/admin/teams/${teamId}/members/from-user`, { method: "POST", body: JSON.stringify({ ownerMemberId, userId }) }),
-  applications: (teamId: number) => requestJson<{ items: ApplicationItem[] }>(`/admin/teams/${teamId}/applications`),
-  createApplication: (teamId: number, payload: Record<string, unknown>) => requestJson<ApplicationItem>(`/admin/teams/${teamId}/applications`, { method: "POST", body: JSON.stringify(payload) }),
   teamModels: (teamId: number) => requestJson<{ teamId: number; logicalModels: string[] }>(`/admin/teams/${teamId}/model-access`),
   teamEntitlementRequests: (teamId: number) => requestJson<{ items: TeamEntitlement[] }>(`/admin/teams/${teamId}/entitlement-requests`),
   requestTeamEntitlement: (teamId: number, payload: Record<string, unknown>) => requestJson<TeamEntitlement>(`/admin/teams/${teamId}/entitlement-requests`, { method: "POST", body: JSON.stringify(payload) }),
-  reviewTeamEntitlement: (requestId: number, decision: "APPROVE" | "REJECT", reviewerNote = "") => requestJson<TeamEntitlement>(`/admin/entitlement-requests/${requestId}/review`, { method: "POST", body: JSON.stringify({ decision, reviewerNote }) }),
+  entitlementRequests: (status = "PENDING") => requestJson<{ items: TeamEntitlement[] }>(withQuery("/admin/entitlement-requests", { status })),
+  grantTeamEntitlement: (teamId: number, payload: Record<string, unknown>) => requestJson<void>(`/admin/teams/${teamId}/entitlements`, { method: "POST", body: JSON.stringify(payload) }),
+  reviewTeamEntitlement: (requestId: number, payload: Record<string, unknown>) => requestJson<TeamEntitlement>(`/admin/entitlement-requests/${requestId}/review`, { method: "POST", body: JSON.stringify(payload) }),
   grantMemberAccess: (teamId: number, memberId: number, payload: Record<string, unknown>) => requestJson<MemberAccess>(`/admin/teams/${teamId}/members/${memberId}/access`, { method: "POST", body: JSON.stringify(payload) }),
-  rotateMemberKey: (teamId: number, memberId: number, applicationId: number, ownerMemberId: number) => requestJson<CreateApiKeyResponse>(`/admin/teams/${teamId}/members/${memberId}/applications/${applicationId}/key-rotation`, { method: "POST", body: JSON.stringify({ ownerMemberId }) }),
+  memberKeyStatus: (memberId: number) => requestJson<MemberKeyStatus>(`/admin/members/${memberId}/api-key-status`),
+  generateMemberKey: (memberId: number) => requestJson<CreateApiKeyResponse>(`/admin/members/${memberId}/api-keys/generate`, { method: "POST" }),
+  rotateMemberKey: (memberId: number) => requestJson<CreateApiKeyResponse>(`/admin/members/${memberId}/api-keys/rotate`, { method: "POST" }),
   teamQuota: (teamId: number) => requestJson<QuotaBalance>(`/admin/teams/${teamId}/quota`),
   memberQuota: (memberId: number) => requestJson<QuotaBalance>(`/admin/members/${memberId}/quota`),
   teamBillingSummary: (teamId: number) => requestJson<BillingSummary>(`/admin/teams/${teamId}/billing-summary`),

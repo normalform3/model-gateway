@@ -2,8 +2,6 @@ package com.modelgate.auth;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.modelgate.common.api.AdminDtos.CreateMemberApiKeyRequest;
-import com.modelgate.common.api.AdminDtos.CreateApiKeyRequest;
 import com.modelgate.common.api.AdminDtos.CreateApiKeyResponse;
 import com.modelgate.common.domain.ApiKeyContext;
 import com.modelgate.common.domain.BudgetPolicy;
@@ -11,7 +9,6 @@ import com.modelgate.common.domain.RateLimitPolicy;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.infrastructure.db.AdminRepository;
-import com.modelgate.infrastructure.db.AdminControlRepository;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -32,49 +29,27 @@ public class VirtualKeyService {
     private static final Duration REDIS_TTL = Duration.ofMinutes(5);
 
     private final AdminRepository adminRepository;
-    private final AdminControlRepository adminControlRepository;
     private final StringRedisTemplate redisTemplate;
     private final Cache<String, ApiKeyContext> localCache = Caffeine.newBuilder()
             .maximumSize(20_000)
             .expireAfterWrite(Duration.ofMinutes(2))
             .build();
 
-    public VirtualKeyService(AdminRepository adminRepository, AdminControlRepository adminControlRepository, StringRedisTemplate redisTemplate) {
+    public VirtualKeyService(AdminRepository adminRepository, StringRedisTemplate redisTemplate) {
         this.adminRepository = adminRepository;
-        this.adminControlRepository = adminControlRepository;
         this.redisTemplate = redisTemplate;
     }
 
-    public CreateApiKeyResponse create(CreateApiKeyRequest request) {
-        String apiKey = "mg-key-" + randomToken();
-        String prefix = apiKey.substring(0, Math.min(apiKey.length(), 18));
-        String hash = sha256(apiKey);
-        long keyId = adminRepository.insertApiKey(request, prefix, hash);
-        return new CreateApiKeyResponse(keyId, prefix, apiKey, true);
-    }
-
-    public CreateApiKeyResponse createForMember(long teamId, long memberId, CreateMemberApiKeyRequest request) {
-        if (!adminControlRepository.teamAllowsModels(teamId, request.allowedModels())) {
-            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST,
-                    "Every allowed model on an API key must be granted to the team first.");
-        }
-        String apiKey = "mg-key-" + randomToken();
-        String prefix = apiKey.substring(0, Math.min(apiKey.length(), 18));
-        String hash = sha256(apiKey);
-        long keyId = adminRepository.insertMemberApiKey(teamId, memberId, request, prefix, hash);
-        return new CreateApiKeyResponse(keyId, prefix, apiKey, true);
-    }
-
-    /** The control plane supplies access; this service alone creates the secret material. */
-    public CreateApiKeyResponse provisionSystemMemberKey(long teamId, long memberId, long applicationId) {
-        Optional<Long> existing = adminRepository.findActiveMemberKeyId(teamId, memberId, applicationId);
+    /** A member owns at most one active key; its model set is resolved dynamically. */
+    public CreateApiKeyResponse provisionMemberKey(long teamId, long memberId) {
+        Optional<Long> existing = adminRepository.findActiveMemberKeyId(teamId, memberId);
         if (existing.isPresent()) {
             throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST,
-                    "A system-provisioned active key already exists for this member and application. Rotate it instead.");
+                    "An active key already exists for this member. Rotate it instead.");
         }
         String apiKey = "mg-key-" + randomToken();
         String prefix = apiKey.substring(0, Math.min(apiKey.length(), 18));
-        long keyId = adminRepository.insertSystemMemberApiKey(teamId, memberId, applicationId, prefix, sha256(apiKey));
+        long keyId = adminRepository.insertSystemMemberApiKey(teamId, memberId, prefix, sha256(apiKey));
         return new CreateApiKeyResponse(keyId, prefix, apiKey, true);
     }
 
@@ -199,7 +174,6 @@ public class VirtualKeyService {
                 Long.toString(context.keyId()),
                 Long.toString(context.organizationId()),
                 Long.toString(context.teamId()),
-                Long.toString(context.applicationId()),
                 context.memberId() == null ? "" : Long.toString(context.memberId()),
                 Long.toString(context.quotaAccountId()),
                 String.join(",", context.allowedModels()),
@@ -214,25 +188,23 @@ public class VirtualKeyService {
 
     private ApiKeyContext decode(String value) {
         String[] p = value.split("\\|", -1);
-        int offset = p.length >= 14 ? 1 : 0;
-        Long memberId = offset == 0 || p[4].isBlank() ? null : Long.parseLong(p[4]);
-        Set<String> models = p[5 + offset].isBlank() ? Set.of() : new LinkedHashSet<>(Arrays.asList(p[5 + offset].split(",")));
-        OffsetDateTime expiresAt = p[12 + offset].isBlank() ? null : OffsetDateTime.parse(p[12 + offset]);
+        Long memberId = p[3].isBlank() ? null : Long.parseLong(p[3]);
+        Set<String> models = p[5].isBlank() ? Set.of() : new LinkedHashSet<>(Arrays.asList(p[5].split(",")));
+        OffsetDateTime expiresAt = p[12].isBlank() ? null : OffsetDateTime.parse(p[12]);
         return new ApiKeyContext(
                 Long.parseLong(p[0]),
                 Long.parseLong(p[1]),
                 Long.parseLong(p[2]),
-                Long.parseLong(p[3]),
                 memberId,
-                Long.parseLong(p[4 + offset]),
+                Long.parseLong(p[4]),
                 models,
                 new RateLimitPolicy(
-                        Integer.parseInt(p[6 + offset]),
-                        Integer.parseInt(p[7 + offset]),
-                        Integer.parseInt(p[8 + offset]),
-                        Integer.parseInt(p[9 + offset])),
-                new BudgetPolicy(Long.parseLong(p[10 + offset])),
-                Boolean.parseBoolean(p[11 + offset]),
+                        Integer.parseInt(p[6]),
+                        Integer.parseInt(p[7]),
+                        Integer.parseInt(p[8]),
+                        Integer.parseInt(p[9])),
+                new BudgetPolicy(Long.parseLong(p[10])),
+                Boolean.parseBoolean(p[11]),
                 expiresAt);
     }
 

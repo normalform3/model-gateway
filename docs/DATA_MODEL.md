@@ -7,8 +7,7 @@ Organization 企业
     └── Team 团队
           ├── Platform User 用户
           │     └── Team Member 团队成员关系
-          └── Application 应用
-                └── Virtual API Key 虚拟密钥
+          └── Virtual API Key 虚拟密钥
 ```
 
 授权链固定为：平台管理员向团队发放模型权限和公共 Token，团队负责人再向成员划拨 Token 与模型权限，系统据此签发成员 Key。团队负责人为空时团队为 `DRAFT`，不得接收授权。
@@ -21,7 +20,6 @@ Organization 企业
 - `platform_user`
 - `team`
 - `team_member`
-- `application`
 - `virtual_api_key`
 - `team_entitlement_request`
 - `team_model_grant`
@@ -61,7 +59,6 @@ public record ApiKeyContext(
         Long keyId,
         Long organizationId,
         Long teamId,
-        Long applicationId,
         Long memberId,
         Long quotaAccountId,
         Set<String> allowedModels,
@@ -77,8 +74,8 @@ public record ApiKeyContext(
 - 页面展示只允许使用 Key 前缀。
 - 明文虚拟 Key 只在创建时返回一次。
 - 真实 Provider 凭据不暴露给业务应用。
-- 成员级计量依赖系统签发的独立虚拟 Key。Key 必须绑定 `owner_member_id` 和 `application_id`，不能用共享 Key 伪造按人统计。
-- 负责人不生成 Key，只完成成员模型权限与额度划拨；成员首次在应用下获得有效访问权限时系统生成 Key。模型权限不再存为 Key 的事实来源。
+- 成员级计量依赖独立虚拟 Key。Key 只绑定 `owner_member_id`，不能用共享 Key 伪造按人统计。
+- 负责人不生成 Key，只完成成员模型权限与额度划拨；开发者在 Key 页面自行生成。模型权限不再存为 Key 的事实来源。
 
 ## Provider、直接模型与团队授权
 
@@ -118,7 +115,6 @@ CREATE TABLE ai_request (
     request_id VARCHAR(64) NOT NULL,
     organization_id BIGINT NOT NULL,
     team_id BIGINT NOT NULL,
-    application_id BIGINT NOT NULL,
     api_key_id BIGINT NOT NULL,
     member_id BIGINT,
     requested_model VARCHAR(100) NOT NULL,
@@ -136,7 +132,6 @@ CREATE TABLE ai_request (
     completed_at DATETIME,
     UNIQUE KEY uk_request_id(request_id),
     KEY idx_team_created(team_id, created_at),
-    KEY idx_application_created(application_id, created_at)
 );
 ```
 
@@ -149,7 +144,6 @@ CREATE TABLE ai_request (
 - `request_id`
 - `organization_id`
 - `team_id`
-- `application_id`
 - `api_key_id`
 - `member_id`
 - `provider`
@@ -232,7 +226,6 @@ CREATE TABLE quota_transaction (
 - `request_id`
 - `organization_id`
 - `team_id`
-- `application_id`
 - `api_key_id`
 - `provider`
 - `model`

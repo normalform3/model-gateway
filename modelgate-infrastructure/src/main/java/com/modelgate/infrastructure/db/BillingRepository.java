@@ -30,15 +30,14 @@ public class BillingRepository {
     public void insertUsage(UsageReportedEvent event) {
         jdbcTemplate.update("""
                         INSERT IGNORE INTO usage_record(
-                            event_id, request_id, organization_id, team_id, application_id, api_key_id,
+                            event_id, request_id, organization_id, team_id, api_key_id,
                             member_id, provider, model, input_tokens, output_tokens, total_tokens, usage_source, status, occurred_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 event.eventId(),
                 event.requestId(),
                 event.organizationId(),
                 event.teamId(),
-                event.applicationId(),
                 event.apiKeyId(),
                 event.memberId(),
                 event.provider(),
@@ -58,15 +57,14 @@ public class BillingRepository {
                 .add(pricing.outputPricePerMillion().multiply(BigDecimal.valueOf(event.outputTokens())).movePointLeft(6));
         jdbcTemplate.update("""
                         INSERT IGNORE INTO billing_record(
-                            request_id, organization_id, team_id, application_id, api_key_id,
+                            request_id, organization_id, team_id, api_key_id,
                             member_id, provider, model, input_tokens, output_tokens, unit_price, amount, currency, billing_type, created_at
                             , input_unit_price, output_unit_price
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 event.requestId(),
                 event.organizationId(),
                 event.teamId(),
-                event.applicationId(),
                 event.apiKeyId(),
                 event.memberId(),
                 event.provider(),

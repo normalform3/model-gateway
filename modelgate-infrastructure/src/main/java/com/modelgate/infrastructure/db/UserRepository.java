@@ -195,7 +195,6 @@ public class UserRepository {
         jdbcTemplate.update("DELETE FROM team_model_grant WHERE team_id = ?", teamId);
         jdbcTemplate.update("DELETE FROM team_direct_model_access WHERE team_id = ?", teamId);
         jdbcTemplate.update("DELETE FROM team_model_access WHERE team_id = ?", teamId);
-        jdbcTemplate.update("DELETE FROM application WHERE team_id = ?", teamId);
         jdbcTemplate.update("DELETE FROM team_member WHERE team_id = ?", teamId);
     }
 

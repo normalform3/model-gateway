@@ -5,10 +5,11 @@ import ProviderPage from "./pages/ProviderPage.vue";
 import TeamsPage from "./pages/TeamsPage.vue";
 import ApiKeysPage from "./pages/ApiKeysPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
+import EntitlementRequestsPage from "./pages/EntitlementRequestsPage.vue";
 import { api, type PlatformUser } from "./api";
 
 type RoleView = "platform-admin" | "team-admin" | "developer";
-type Page = "dashboard" | "users" | "providers" | "teams" | "keys";
+type Page = "dashboard" | "users" | "providers" | "teams" | "requests" | "keys";
 interface NavItem { key: Page; label: string; caption: string; }
 
 const ROLE_STORAGE_KEY = "modelgate-role-view";
@@ -26,6 +27,7 @@ const menus: Record<RoleView, NavItem[]> = {
     { key: "users", label: "用户管理", caption: "用户、团队归属与角色" },
     { key: "providers", label: "模型供应商", caption: "凭据、模型与价格" },
     { key: "teams", label: "企业团队", caption: "团队与权益管理" },
+    { key: "requests", label: "授权申请", caption: "集中审批团队申请" },
     { key: "keys", label: "虚拟 API Key", caption: "分发与停用" }
   ],
   "team-admin": [
@@ -78,6 +80,7 @@ onMounted(loadUsers);
       <UsersPage v-else-if="page === 'users'" />
       <ProviderPage v-else-if="page === 'providers'" />
       <TeamsPage v-else-if="page === 'teams'" :owner-user-id="roleView === 'team-admin' ? selectedUserId : null" :owner-member-id="roleView === 'team-admin' ? currentUser?.memberId : null" :admin-mode="roleView === 'platform-admin'" />
+      <EntitlementRequestsPage v-else-if="page === 'requests'" />
       <ApiKeysPage v-else :default-team-id="currentUser?.teamId" :default-member-id="roleView === 'developer' ? currentUser?.memberId : null" :owner-member-id="roleView === 'team-admin' ? currentUser?.memberId : null" />
     </section>
   </main>
