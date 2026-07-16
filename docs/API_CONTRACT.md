@@ -78,6 +78,15 @@ data: {"id":"chatcmpl-example","object":"chat.completion.chunk","choices":[{"del
 data: [DONE]
 ```
 
+流式请求在已经开始输出后不能改写 HTTP 状态码。Provider 超时、流式中断或其他可公开的 Provider 错误会发送一个 `event: error` 后关闭连接，且不会再发送 `[DONE]`：
+
+```text
+event: error
+data: {"error":{"code":"PROVIDER_TIMEOUT","message":"The provider request timed out.","requestId":"req-example","retryable":true}}
+```
+
+该事件只包含标准错误码、公共错误消息和请求 ID，不包含 Provider 密钥、私有地址或内部异常详情。
+
 ## 虚拟 API Key 管理
 
 MVP 控制面接口可以先面向内部管理后台，不要求完全公开。

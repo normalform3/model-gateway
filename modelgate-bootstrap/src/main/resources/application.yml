@@ -23,6 +23,10 @@ modelgate:
     master-key: ${MODELGATE_PROVIDER_MASTER_KEY:}
   mock:
     default-delay-ms: ${MODELGATE_MOCK_DELAY_MS:80}
+  provider-timeout:
+    completion: ${MODELGATE_PROVIDER_COMPLETION_TIMEOUT:60s}
+    stream-first-event: ${MODELGATE_PROVIDER_STREAM_FIRST_EVENT_TIMEOUT:30s}
+    stream-idle: ${MODELGATE_PROVIDER_STREAM_IDLE_TIMEOUT:60s}
   test-observability:
     enabled: ${MODELGATE_TEST_OBSERVABILITY_ENABLED:false}
   test-runner:

@@ -140,6 +140,20 @@ curl -N -X POST http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+## Mock 超时与断连演练
+
+默认超时为普通响应 60 秒、SSE 首事件 30 秒、SSE 空闲 60 秒。开发或测试时可用环境变量缩短它们，例如：
+
+```bash
+MODELGATE_PROVIDER_STREAM_FIRST_EVENT_TIMEOUT=100ms \
+MODELGATE_PROVIDER_STREAM_IDLE_TIMEOUT=100ms \
+mvn -pl modelgate-bootstrap spring-boot:run
+```
+
+- 在普通请求或流式请求的 `mock` 中设置较大的 `delayMs`，可演练普通响应或首事件超时。
+- `{"mode":"stream_stall","delayMs":1000}` 会先输出两个片段，再暂停指定时间，用于验证流中空闲超时。
+- 流已开始输出后发生超时或中断时，响应以 `event: error` 结束，不会发送 `[DONE]`。可在 `curl -N` 运行期间中断客户端，确认请求记录为取消且并发、冻结额度仅结算一次。
+
 ## 查询
 
 ```bash

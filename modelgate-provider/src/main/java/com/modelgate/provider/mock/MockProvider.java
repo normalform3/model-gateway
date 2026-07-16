@@ -56,9 +56,7 @@ public class MockProvider implements AiProvider {
         }
 
         List<String> parts = List.of("ModelGate", " routes", " AI", " traffic", " through", " a", " controlled", " gateway.");
-        Flux<ProviderStreamChunk> chunks = Flux.fromIterable(parts)
-                .delayElements(Duration.ofMillis(delayMs(behavior)))
-                .map(ProviderStreamChunk::content);
+        Flux<ProviderStreamChunk> chunks = streamChunks(parts, behavior);
 
         if (behavior.mode("stream_break")) {
             return chunks.take(4).concatWith(Flux.error(new ModelGateException(ErrorCode.PROVIDER_UNAVAILABLE, "Mock stream interrupted.", request.requestId())));
@@ -66,6 +64,18 @@ public class MockProvider implements AiProvider {
 
         Usage usage = behavior.mode("usage_missing") ? null : usage(behavior);
         return chunks.concatWith(Mono.just(ProviderStreamChunk.done(usage)));
+    }
+
+    private Flux<ProviderStreamChunk> streamChunks(List<String> parts, MockBehavior behavior) {
+        Duration chunkDelay = Duration.ofMillis(behavior.mode("stream_stall") ? defaultDelayMs : delayMs(behavior));
+        if (!behavior.mode("stream_stall")) {
+            return Flux.fromIterable(parts).delayElements(chunkDelay).map(ProviderStreamChunk::content);
+        }
+        List<String> initial = parts.subList(0, 2);
+        List<String> remaining = parts.subList(2, parts.size());
+        Duration stallDelay = Duration.ofMillis(behavior.delayMs() == null ? Math.max(defaultDelayMs, 300L) : Math.max(0L, behavior.delayMs()));
+        return Flux.fromIterable(initial).delayElements(chunkDelay).map(ProviderStreamChunk::content)
+                .concatWith(Mono.delay(stallDelay).thenMany(Flux.fromIterable(remaining).delayElements(chunkDelay).map(ProviderStreamChunk::content)));
     }
 
     private MockBehavior behavior(ProviderRequest request) {

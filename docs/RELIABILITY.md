@@ -123,6 +123,12 @@ available += estimatedTokens
 3. 后续 Provider 账单回查。
 4. 人工补偿。
 
+当前网关在收到流式片段后记录已生成内容；客户端取消或 Provider 失败时，若已有片段则按该内容估算用量结算，并释放未消费的冻结额度。尚未收到任何片段时释放整笔预占额度。流式终态清理由 Reactor 取消回调串联，不能通过脱离请求生命周期的独立订阅执行。
+
+## Provider 超时
+
+默认策略：普通响应总超时 60 秒，SSE 首事件超时 30 秒，SSE 相邻事件空闲超时 60 秒。SSE 不设置总时长上限，避免正常的长生成被误杀。超时统一映射为 `PROVIDER_TIMEOUT`；流已开始写出时发送 `event: error` 后关闭连接。
+
 ## RocketMQ Topic
 
 MVP Topic：

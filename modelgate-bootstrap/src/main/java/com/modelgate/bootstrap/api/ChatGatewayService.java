@@ -1,6 +1,7 @@
 package com.modelgate.bootstrap.api;
 
 import com.modelgate.auth.VirtualKeyService;
+import com.modelgate.common.api.ErrorResponse;
 import com.modelgate.common.chat.ChatCompletionChunk;
 import com.modelgate.common.chat.ChatCompletionRequest;
 import com.modelgate.common.chat.ChatCompletionResponse;
@@ -49,6 +50,7 @@ public class ChatGatewayService {
     private final StringRedisTemplate redisTemplate;
     private final OpenAiCompatibleProviderClient openAiCompatibleProviderClient;
     private final TestObservabilityService testObservabilityService;
+    private final ProviderTimeoutProperties providerTimeouts;
 
     public ChatGatewayService(
             VirtualKeyService virtualKeyService,
@@ -60,7 +62,8 @@ public class ChatGatewayService {
             UsageCompletedOutboxService usageCompletedOutboxService,
             StringRedisTemplate redisTemplate,
             OpenAiCompatibleProviderClient openAiCompatibleProviderClient,
-            TestObservabilityService testObservabilityService
+            TestObservabilityService testObservabilityService,
+            ProviderTimeoutProperties providerTimeouts
     ) {
         this.virtualKeyService = virtualKeyService;
         this.routeRepository = routeRepository;
@@ -72,6 +75,7 @@ public class ChatGatewayService {
         this.redisTemplate = redisTemplate;
         this.openAiCompatibleProviderClient = openAiCompatibleProviderClient;
         this.testObservabilityService = testObservabilityService;
+        this.providerTimeouts = providerTimeouts;
     }
 
     public Mono<ChatCompletionResponse> complete(String authorization, String idempotencyKey, String testRunId, ChatCompletionRequest request) {
@@ -115,18 +119,27 @@ public class ChatGatewayService {
                     RouteTarget target = ctx.target();
                     QuotaReservation reservation = ctx.reservation();
                     AtomicBoolean terminal = new AtomicBoolean();
-                    return streamProvider(target, new ProviderRequest(requestId, request.model(), target.actualModel(), request))
-                            .concatMap(chunk -> toSse(requestId, request, chunk, firstTokenMs, usageRef, content)
-                                    .flatMap(event -> {
-                                        if (!chunk.done()) {
-                                            return Mono.just(event);
-                                        }
-                                        return finishStream(apiKey, target, request.model(), reservation, requestId, start, firstTokenMs, usageRef, content, terminal)
-                                                .thenReturn(event);
-                                    }))
-                            .onErrorResume(ex -> fail(apiKey, target, request.model(), reservation, requestId, start, ex, terminal).then(Mono.error(ex)))
-                            .doOnCancel(() -> fail(apiKey, target, request.model(), reservation, requestId, start,
-                                    new ModelGateException(ErrorCode.INTERNAL_ERROR, "Client cancelled stream."), terminal).subscribe());
+                    StreamSession session = new StreamSession(apiKey, target, request.model(), reservation, requestId, start, firstTokenMs, usageRef, content, terminal);
+                    return Flux.usingWhen(
+                            Mono.just(session),
+                            ignored -> streamProvider(target, new ProviderRequest(requestId, request.model(), target.actualModel(), request))
+                                    .concatMap(chunk -> toSse(requestId, request, chunk, firstTokenMs, usageRef, content)
+                                            .doOnSuccess(event -> {
+                                                if (chunk.done()) session.markDone();
+                                            }))
+                                    .onErrorResume(ex -> {
+                                        session.recordFailure(ex);
+                                        return Flux.just(errorSse(ex, requestId));
+                                    })
+                                    .concatWith(Mono.defer(() -> {
+                                        if (session.done() || session.failure() != null) return Mono.empty();
+                                        ModelGateException ex = new ModelGateException(ErrorCode.PROVIDER_UNAVAILABLE, "Provider stream ended without a completion marker.", requestId);
+                                        session.recordFailure(ex);
+                                        return Mono.just(errorSse(ex, requestId));
+                                    })),
+                            StreamSession::complete,
+                            (failedSession, ex) -> failedSession.fail(ex),
+                            StreamSession::cancel);
                 });
     }
 
@@ -154,16 +167,16 @@ public class ChatGatewayService {
 
     private Mono<ProviderResponse> completeProvider(RouteTarget target, ProviderRequest request) {
         if ("OPENAI_COMPATIBLE".equals(target.providerType())) {
-            return openAiCompatibleProviderClient.complete(target, request);
+            return ProviderTimeouts.completion(openAiCompatibleProviderClient.complete(target, request), providerTimeouts.completion(), request.requestId());
         }
-        return providerRegistry.get("mock").complete(request);
+        return ProviderTimeouts.completion(providerRegistry.get("mock").complete(request), providerTimeouts.completion(), request.requestId());
     }
 
     private Flux<ProviderStreamChunk> streamProvider(RouteTarget target, ProviderRequest request) {
         if ("OPENAI_COMPATIBLE".equals(target.providerType())) {
-            return openAiCompatibleProviderClient.stream(target, request);
+            return ProviderTimeouts.stream(openAiCompatibleProviderClient.stream(target, request), providerTimeouts.streamFirstEvent(), providerTimeouts.streamIdle(), request.requestId());
         }
-        return providerRegistry.get("mock").stream(request);
+        return ProviderTimeouts.stream(providerRegistry.get("mock").stream(request), providerTimeouts.streamFirstEvent(), providerTimeouts.streamIdle(), request.requestId());
     }
 
     private Mono<ServerSentEvent<Object>> toSse(
@@ -219,14 +232,44 @@ public class ChatGatewayService {
     }
 
     private Mono<Void> fail(ApiKeyContext apiKey, RouteTarget target, String requestedModel, QuotaReservation reservation, String requestId, long start, Throwable ex, AtomicBoolean terminal) {
+        return failStream(apiKey, target, requestedModel, reservation, requestId, start, ex, new AtomicLong(-1L), new StringBuilder(), terminal);
+    }
+
+    private Mono<Void> failStream(
+            ApiKeyContext apiKey,
+            RouteTarget target,
+            String requestedModel,
+            QuotaReservation reservation,
+            String requestId,
+            long start,
+            Throwable ex,
+            AtomicLong firstTokenAt,
+            StringBuilder content,
+            AtomicBoolean terminal
+    ) {
         return Mono.fromRunnable(() -> {
             if (!terminal.compareAndSet(false, true)) return;
-            List<QuotaSettlementSnapshot> settlements = quotaService.release(apiKey, requestedModel, reservation);
-            ErrorCode errorCode = ex instanceof ModelGateException mge ? mge.errorCode() : ErrorCode.INTERNAL_ERROR;
+            int outputTokens = estimatePartialOutputTokens(content.toString());
+            Usage usage = Usage.of(reservation.inputTokens(), outputTokens);
+            List<QuotaSettlementSnapshot> settlements = outputTokens == 0
+                    ? quotaService.release(apiKey, requestedModel, reservation)
+                    : quotaService.settle(apiKey, requestedModel, reservation, usage.totalTokens());
+            ErrorCode errorCode = errorCode(ex);
             long durationMs = System.currentTimeMillis() - start;
             RequestStatus status = "Client cancelled stream.".equals(ex.getMessage()) ? RequestStatus.CANCELLED : RequestStatus.FAILED;
-            usageCompletedOutboxService.complete(apiKey, target, requestId, requestedModel, Usage.of(reservation.inputTokens(), 0), durationMs, null, status, errorCode.name(), settlements);
+            Long firstTokenMs = firstTokenAt.get() < 0 ? null : firstTokenAt.get() - start;
+            usageCompletedOutboxService.complete(apiKey, target, requestId, requestedModel, usage, durationMs, firstTokenMs, status, errorCode.name(), settlements);
         }).subscribeOn(Schedulers.boundedElastic()).then();
+    }
+
+    static ServerSentEvent<Object> errorSse(Throwable ex, String requestId) {
+        ErrorCode code = errorCode(ex);
+        ErrorResponse error = new ErrorResponse(new ErrorResponse.ErrorBody(code.name(), code.defaultMessage(), requestId, code.retryable()));
+        return ServerSentEvent.builder((Object) error).event("error").build();
+    }
+
+    private static ErrorCode errorCode(Throwable ex) {
+        return ex instanceof ModelGateException mge ? mge.errorCode() : ErrorCode.INTERNAL_ERROR;
     }
 
     private Usage normalizedUsage(ProviderResponse response, ChatCompletionRequest request, QuotaReservation reservation) {
@@ -239,6 +282,10 @@ public class ChatGatewayService {
 
     private int estimateOutputTokens(String text) {
         return Math.max(1, (int) Math.ceil((text == null ? 0 : text.length()) / 4.0));
+    }
+
+    private int estimatePartialOutputTokens(String text) {
+        return text == null || text.isEmpty() ? 0 : estimateOutputTokens(text);
     }
 
     private void reserveIdempotency(ApiKeyContext apiKey, String idempotencyKey) {
@@ -257,5 +304,70 @@ public class ChatGatewayService {
     }
 
     private record PreparedRequest(ApiKeyContext apiKey, RouteTarget target, QuotaReservation reservation) {
+    }
+
+    private final class StreamSession {
+        private final ApiKeyContext apiKey;
+        private final RouteTarget target;
+        private final String requestedModel;
+        private final QuotaReservation reservation;
+        private final String requestId;
+        private final long start;
+        private final AtomicLong firstTokenAt;
+        private final AtomicReference<Usage> usage;
+        private final StringBuilder content;
+        private final AtomicBoolean terminal;
+        private final AtomicBoolean done = new AtomicBoolean();
+        private final AtomicReference<Throwable> failure = new AtomicReference<>();
+
+        private StreamSession(ApiKeyContext apiKey, RouteTarget target, String requestedModel, QuotaReservation reservation,
+                              String requestId, long start, AtomicLong firstTokenAt, AtomicReference<Usage> usage,
+                              StringBuilder content, AtomicBoolean terminal) {
+            this.apiKey = apiKey;
+            this.target = target;
+            this.requestedModel = requestedModel;
+            this.reservation = reservation;
+            this.requestId = requestId;
+            this.start = start;
+            this.firstTokenAt = firstTokenAt;
+            this.usage = usage;
+            this.content = content;
+            this.terminal = terminal;
+        }
+
+        private void markDone() {
+            done.set(true);
+        }
+
+        private boolean done() {
+            return done.get();
+        }
+
+        private void recordFailure(Throwable ex) {
+            failure.compareAndSet(null, ex);
+        }
+
+        private Throwable failure() {
+            return failure.get();
+        }
+
+        private Mono<Void> complete() {
+            Throwable ex = failure();
+            if (ex != null) return fail(ex);
+            if (done()) return finishStream(apiKey, target, requestedModel, reservation, requestId, start, firstTokenAt, usage, content, terminal);
+            return fail(new ModelGateException(ErrorCode.PROVIDER_UNAVAILABLE, "Provider stream ended without a completion marker.", requestId));
+        }
+
+        private Mono<Void> fail(Throwable ex) {
+            return failStream(apiKey, target, requestedModel, reservation, requestId, start, ex, firstTokenAt, content, terminal);
+        }
+
+        private Mono<Void> cancel() {
+            if (done()) return finishStream(apiKey, target, requestedModel, reservation, requestId, start, firstTokenAt, usage, content, terminal);
+            Throwable ex = failure();
+            return fail(ex == null
+                    ? new ModelGateException(ErrorCode.INTERNAL_ERROR, "Client cancelled stream.", requestId)
+                    : ex);
+        }
     }
 }
