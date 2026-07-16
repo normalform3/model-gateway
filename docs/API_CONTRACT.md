@@ -360,6 +360,22 @@ GET /admin/teams/{teamId}/quota
 
 `GET /admin/members/{memberId}/quota` 查询个人账户；`GET /admin/teams/{teamId}/billing-summary` 和 `GET /admin/members/{memberId}/billing-summary` 分别返回团队与个人聚合账单。
 
+### 平台账单分析
+
+`GET /admin/billing/overview` 面向平台管理员的成本分析工作台。它从既有 `billing_record` 聚合全平台摘要、按币种金额、逐日趋势，以及团队、项目、成员、供应商+实际模型四类排行；所有排行均是同一费用事实的不同视图，不能跨视图累加。
+
+`GET /admin/billing/records` 返回同一筛选范围内按 `createdAt DESC` 排序的可分页账单明细，包含团队、项目、成员归因、调用凭证类型、供应商、实际模型、Token、单价快照、金额和币种。
+
+两个接口共用可选参数：
+
+- `from`、`to`：`yyyy-MM-dd`，按 `Asia/Shanghai` 的完整自然日计算；未传时为当月截至今日，最大 366 天。
+- `teamId`、`projectId`、`memberId`：归因筛选。
+- `provider`、`model`：模型筛选，`model` 始终是实际调用模型。
+- `credentialType`：`DEVELOPER`（成员开发调用）或 `APPLICATION`（项目应用调用）。
+- `currency`：仅查看一种原始币种；未传时金额按币种分别返回，不做汇率换算。
+
+`/records` 另外接受 `page`（从 0 开始）与 `size`（1 至 100，默认 20）。团队/成员原有 `billing-summary` 接口继续保留兼容旧客户端；新工作台不会复用其单币种汇总结果。
+
 ## 开发期测试观察契约
 
 当且仅当 `MODELGATE_TEST_OBSERVABILITY_ENABLED=true` 时，网关公开 `/test-observability/v1`。该契约仅给独立本地 Runner 使用，不属于业务应用接入接口。

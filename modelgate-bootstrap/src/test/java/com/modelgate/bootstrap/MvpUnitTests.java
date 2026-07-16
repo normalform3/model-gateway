@@ -5,6 +5,7 @@ import com.modelgate.auth.ProviderCredentialCipher;
 import com.modelgate.common.api.AdminDtos.DemoIdentity;
 import com.modelgate.common.api.AdminDtos.DemoIdentityResponse;
 import com.modelgate.common.api.AdminDtos.CreateTeamRequest;
+import com.modelgate.common.api.AdminDtos.BillingQuery;
 import com.modelgate.common.api.AdminDtos.GrantMemberAccessRequest;
 import com.modelgate.common.api.AdminDtos.ModelEntitlementItem;
 import com.modelgate.common.api.AdminDtos.UpsertModelEntitlementRequest;
@@ -50,6 +51,7 @@ import java.util.Map;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.time.OffsetDateTime;
+import java.time.LocalDate;
 import java.io.InputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -212,6 +214,40 @@ class MvpUnitTests {
         new BillingRepository(jdbcTemplate).teamSummary(4L);
 
         assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("FROM billing_record\n WHERE team_id = ?"));
+    }
+
+    @Test
+    void billingRecordsApplyAllAttributionFiltersToTheSameFactQuery() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+        BillingRepository repository = new BillingRepository(jdbcTemplate);
+
+        repository.records(new BillingQuery(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 7), 2L, 3L, 4L,
+                "mock", "mock-gpt-4o-mini", "APPLICATION", "USD"), 0, 20);
+
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("b.team_id = ?")
+                && sql.contains("b.project_id = ?") && sql.contains("b.member_id = ?")
+                && sql.contains("b.provider = ?") && sql.contains("b.model = ?")
+                && sql.contains("b.credential_type = ?") && sql.contains("b.currency = ?"));
+    }
+
+    @Test
+    void billingQueryRejectsAnUnsupportedCredentialTypeBeforeQuerying() {
+        BillingRepository repository = new BillingRepository(new RecordingJdbcTemplate());
+
+        assertThatThrownBy(() -> repository.records(new BillingQuery(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 7), null, null, null,
+                null, null, "SHARED", null), 0, 20))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("credentialType must be DEVELOPER or APPLICATION");
+    }
+
+    @Test
+    void billingQueryRejectsRangesLongerThan366CalendarDays() {
+        BillingRepository repository = new BillingRepository(new RecordingJdbcTemplate());
+
+        assertThatThrownBy(() -> repository.records(new BillingQuery(LocalDate.of(2025, 1, 1), LocalDate.of(2026, 1, 2), null, null, null,
+                null, null, null, null), 0, 20))
+                .isInstanceOf(ModelGateException.class)
+                .hasMessageContaining("no longer than 366 days");
     }
 
     @Test

@@ -20,6 +20,7 @@ import com.modelgate.infrastructure.db.ProviderModelQuotaPoolRepository;
 import com.modelgate.quota.QuotaService;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -31,6 +32,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+
+import java.time.LocalDate;
 
 
 @RestController
@@ -521,6 +524,38 @@ public class AdminController {
     @GetMapping("/members/{memberId}/billing-summary")
     public Mono<BillingSummary> memberBillingSummary(@PathVariable("memberId") long memberId) {
         return Mono.fromCallable(() -> billingRepository.memberSummary(memberId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/billing/overview")
+    public Mono<BillingOverview> billingOverview(
+            @org.springframework.web.bind.annotation.RequestParam(name = "from", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @org.springframework.web.bind.annotation.RequestParam(name = "to", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+            @org.springframework.web.bind.annotation.RequestParam(name = "teamId", required = false) Long teamId,
+            @org.springframework.web.bind.annotation.RequestParam(name = "projectId", required = false) Long projectId,
+            @org.springframework.web.bind.annotation.RequestParam(name = "memberId", required = false) Long memberId,
+            @org.springframework.web.bind.annotation.RequestParam(name = "provider", required = false) String provider,
+            @org.springframework.web.bind.annotation.RequestParam(name = "model", required = false) String model,
+            @org.springframework.web.bind.annotation.RequestParam(name = "credentialType", required = false) String credentialType,
+            @org.springframework.web.bind.annotation.RequestParam(name = "currency", required = false) String currency) {
+        BillingQuery query = new BillingQuery(from, to, teamId, projectId, memberId, provider, model, credentialType, currency);
+        return Mono.fromCallable(() -> billingRepository.overview(query)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/billing/records")
+    public Mono<BillingRecordPage> billingRecords(
+            @org.springframework.web.bind.annotation.RequestParam(name = "from", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @org.springframework.web.bind.annotation.RequestParam(name = "to", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+            @org.springframework.web.bind.annotation.RequestParam(name = "teamId", required = false) Long teamId,
+            @org.springframework.web.bind.annotation.RequestParam(name = "projectId", required = false) Long projectId,
+            @org.springframework.web.bind.annotation.RequestParam(name = "memberId", required = false) Long memberId,
+            @org.springframework.web.bind.annotation.RequestParam(name = "provider", required = false) String provider,
+            @org.springframework.web.bind.annotation.RequestParam(name = "model", required = false) String model,
+            @org.springframework.web.bind.annotation.RequestParam(name = "credentialType", required = false) String credentialType,
+            @org.springframework.web.bind.annotation.RequestParam(name = "currency", required = false) String currency,
+            @org.springframework.web.bind.annotation.RequestParam(name = "page", defaultValue = "0") int page,
+            @org.springframework.web.bind.annotation.RequestParam(name = "size", defaultValue = "20") int size) {
+        BillingQuery query = new BillingQuery(from, to, teamId, projectId, memberId, provider, model, credentialType, currency);
+        return Mono.fromCallable(() -> billingRepository.records(query, safePage(page), safeSize(size))).subscribeOn(Schedulers.boundedElastic());
     }
 
     @GetMapping("/providers")

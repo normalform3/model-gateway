@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import AdminDashboardPage from "./pages/AdminDashboardPage.vue";
+import BillingPage from "./pages/BillingPage.vue";
 import ProviderPage from "./pages/ProviderPage.vue";
 import TeamsPage from "./pages/TeamsPage.vue";
 import ApiKeysPage from "./pages/ApiKeysPage.vue";
@@ -10,7 +11,7 @@ import DeveloperDashboardPage from "./pages/DeveloperDashboardPage.vue";
 import { api, type PlatformUser } from "./api";
 
 type RoleView = "platform-admin" | "team-admin" | "developer";
-type Page = "dashboard" | "users" | "providers" | "teams" | "requests" | "keys";
+type Page = "dashboard" | "billing" | "users" | "providers" | "teams" | "requests" | "keys";
 interface NavItem { key: Page; label: string; caption: string; }
 
 const ROLE_STORAGE_KEY = "modelgate-role-view";
@@ -26,6 +27,7 @@ const page = ref<Page>("dashboard");
 const menus: Record<RoleView, NavItem[]> = {
   "platform-admin": [
     { key: "dashboard", label: "仪表盘", caption: "全局状态与保护" },
+    { key: "billing", label: "账单分析", caption: "全平台成本与用量归因" },
     { key: "teams", label: "企业团队", caption: "团队与权益管理" },
     { key: "requests", label: "授权申请", caption: "集中审批团队申请" },
     { key: "providers", label: "模型供应商", caption: "凭据、模型与价格" },
@@ -85,6 +87,7 @@ onMounted(loadUsers);
     </aside>
     <section class="workspace">
       <AdminDashboardPage v-if="page === 'dashboard' && roleView === 'platform-admin'" />
+      <BillingPage v-else-if="page === 'billing' && roleView === 'platform-admin'" />
       <DeveloperDashboardPage v-else-if="page === 'dashboard'" :member-id="currentUser?.memberId" />
       <UsersPage v-else-if="page === 'users'" />
       <ProviderPage v-else-if="page === 'providers'" />

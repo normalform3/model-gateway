@@ -49,6 +49,12 @@ export interface ProjectServiceAccountStatus { serviceAccountId: number; project
 export interface ApplicationQuotaOverview { teamId: number; balance: QuotaBalance; modelEntitlements: ModelEntitlement[] }
 export interface ProjectApplicationQuotaOverview { projectId: number; balance: QuotaBalance; modelEntitlements: ModelEntitlement[] }
 export interface BillingSummary { scopeId: number; totalTokens: number; totalAmount: number; currency: string; recordCount: number }
+export interface BillingCurrencyAmount { currency: string; amount: number }
+export interface BillingDailyTrend { day: string; totalTokens: number; recordCount: number; amounts: BillingCurrencyAmount[] }
+export interface BillingDimensionItem { id: number | null; teamId: number | null; label: string; provider: string | null; model: string | null; totalTokens: number; recordCount: number; amounts: BillingCurrencyAmount[] }
+export interface BillingOverview { from: string; to: string; totalTokens: number; recordCount: number; amounts: BillingCurrencyAmount[]; dailyTrends: BillingDailyTrend[]; teams: BillingDimensionItem[]; projects: BillingDimensionItem[]; members: BillingDimensionItem[]; models: BillingDimensionItem[] }
+export interface BillingRecordItem { requestId: string; teamId: number | null; teamName: string; projectId: number | null; projectName: string; memberId: number | null; memberName: string; credentialType: "DEVELOPER" | "APPLICATION"; provider: string; model: string; inputTokens: number; outputTokens: number; inputUnitPrice: number; outputUnitPrice: number; amount: number; currency: string; createdAt: string }
+export interface BillingRecordPage { items: BillingRecordItem[]; page: number; size: number; total: number }
 export type QuotaMode = "DAILY" | "WEEKLY" | "UNLIMITED";
 export interface ModelEntitlement { grantId: number; teamId: number; memberId: number | null; modelName: string; quotaMode: QuotaMode; quotaLimit: number | null; status: string; consumedTokens: number; frozenTokens: number; remainingTokens: number | null; cycleStartedAt: string; reason: string; createdAt: string; revokedAt: string | null }
 export interface UsageTrend { day: string; tokens: number; amount: number; requests: number }
@@ -127,6 +133,8 @@ export const api = {
   rotateApplicationKey: (serviceAccountId: number) => requestJson<CreateApiKeyResponse>(`/admin/project-service-accounts/${serviceAccountId}/api-keys/rotate`, { method: "POST" }),
   teamBillingSummary: (teamId: number) => requestJson<BillingSummary>(`/admin/teams/${teamId}/billing-summary`),
   memberBillingSummary: (memberId: number) => requestJson<BillingSummary>(`/admin/members/${memberId}/billing-summary`),
+  billingOverview: (query?: Query) => requestJson<BillingOverview>(withQuery("/admin/billing/overview", query)),
+  billingRecords: (query?: Query) => requestJson<BillingRecordPage>(withQuery("/admin/billing/records", query)),
   teamModelEntitlements: (teamId: number) => requestJson<{ items: ModelEntitlement[] }>(`/admin/teams/${teamId}/model-entitlements`),
   upsertTeamModelEntitlement: (teamId: number, model: string, payload: Record<string, unknown>) => requestJson<ModelEntitlement>(`/admin/teams/${teamId}/model-entitlements/${encodeURIComponent(model)}`, { method: "PUT", body: JSON.stringify(payload) }),
   revokeTeamModelEntitlement: (teamId: number, model: string) => requestJson<void>(`/admin/teams/${teamId}/model-entitlements/${encodeURIComponent(model)}`, { method: "DELETE" }),

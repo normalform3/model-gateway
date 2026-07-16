@@ -46,7 +46,6 @@ Organization 企业
 - `ai_request`
 - `usage_record`
 - `billing_record`
-- `billing_daily_summary`
 
 可靠消息：
 
@@ -242,6 +241,10 @@ CREATE TABLE quota_transaction (
 ## billing_record
 
 账单明细记录费用归因。
+
+`billing_record` 是当前唯一的费用事实来源。平台账单工作台只按时间、团队、项目、成员、凭证类型、供应商和实际模型聚合这张表，不创建第二套费用记录，也不能将平台、团队、项目、成员和模型视图的金额相加。团队 → 成员（开发凭证）与团队 → 项目（应用凭证）是两条并行归因链。
+
+金额按原始 `currency` 分组展示，系统不在查询层进行汇率换算；价格使用写入明细时的输入/输出单价快照，后续改价不影响历史账单。当前查询直接聚合明细表；`billing_daily_summary` 仅是未来在查询量增长后才考虑引入的物化汇总，不是现有表。
 
 关键字段：
 

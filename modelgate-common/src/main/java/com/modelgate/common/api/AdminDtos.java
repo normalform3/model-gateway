@@ -3,8 +3,9 @@ package com.modelgate.common.api;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
-import java.time.OffsetDateTime;
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.List;
 
 public final class AdminDtos {
@@ -218,6 +219,83 @@ public final class AdminDtos {
             String currency,
             long recordCount
     ) {
+    }
+
+    /** Read-only filter for the platform billing workbench. */
+    public record BillingQuery(
+            LocalDate from,
+            LocalDate to,
+            Long teamId,
+            Long projectId,
+            Long memberId,
+            String provider,
+            String model,
+            String credentialType,
+            String currency
+    ) {
+    }
+
+    /** Amounts stay per currency because ModelGate does not convert currencies. */
+    public record BillingCurrencyAmount(String currency, BigDecimal amount) {
+    }
+
+    public record BillingDailyTrend(
+            LocalDate day,
+            long totalTokens,
+            long recordCount,
+            List<BillingCurrencyAmount> amounts
+    ) {
+    }
+
+    /** Reusable aggregation row for team, project, member, or provider/model views. */
+    public record BillingDimensionItem(
+            Long id,
+            Long teamId,
+            String label,
+            String provider,
+            String model,
+            long totalTokens,
+            long recordCount,
+            List<BillingCurrencyAmount> amounts
+    ) {
+    }
+
+    public record BillingOverview(
+            LocalDate from,
+            LocalDate to,
+            long totalTokens,
+            long recordCount,
+            List<BillingCurrencyAmount> amounts,
+            List<BillingDailyTrend> dailyTrends,
+            List<BillingDimensionItem> teams,
+            List<BillingDimensionItem> projects,
+            List<BillingDimensionItem> members,
+            List<BillingDimensionItem> models
+    ) {
+    }
+
+    public record BillingRecordItem(
+            String requestId,
+            Long teamId,
+            String teamName,
+            Long projectId,
+            String projectName,
+            Long memberId,
+            String memberName,
+            String credentialType,
+            String provider,
+            String model,
+            int inputTokens,
+            int outputTokens,
+            BigDecimal inputUnitPrice,
+            BigDecimal outputUnitPrice,
+            BigDecimal amount,
+            String currency,
+            OffsetDateTime createdAt
+    ) {
+    }
+
+    public record BillingRecordPage(List<BillingRecordItem> items, int page, int size, long total) {
     }
 
     public record RequestLogItem(
