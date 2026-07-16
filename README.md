@@ -40,6 +40,12 @@ CodeReader Agent ─┐
 
 MVP 支持 `MOCK_OPENAI` 与 `OPENAI_COMPATIBLE` Provider。客户端直接传递全局唯一的真实模型名；Provider 的多把 API Key 使用 AES-GCM 加密保存，并由网关轮询选择，在首次响应前对可重试故障切换一次备用凭据。
 
+## 双额度体系
+
+团队额度分为互不占用的开发额度池和应用额度池。开发额度沿用“团队 → 开发者 → 开发者 Key”，适合 IDE、Claude Code 等开发工具；应用额度采用“团队 → 项目 → 服务账号 Key”，适合 Agent、RAG 与业务服务。网关按凭证类型冻结团队与下级的同模型权益并分别统计用量和费用。
+
+真实 Provider 的同一直接模型可配置多个加密外部账号组成固定模型额度池。客户端仍只看到模型名；网关只在该模型绑定的 Provider 凭据池内选择可用账号，不进行跨模型或跨 Provider 路由。
+
 Mock Provider 仍可在控制台配置，用于本地验证与故障演练；真实 Provider 的 Base URL 和 API Key 均不得出现在仓库或日志中。
 
 Claude、通义、DeepSeek、本地 vLLM、熔断降级、事务消息、日终对账和管理控制台增强能力放入后续阶段。

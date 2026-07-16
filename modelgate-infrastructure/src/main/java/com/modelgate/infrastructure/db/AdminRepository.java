@@ -16,6 +16,7 @@ import com.modelgate.common.api.AdminDtos.TeamSummary;
 import com.modelgate.common.api.AdminDtos.UpdateTeamMemberRequest;
 import com.modelgate.common.api.AdminDtos.UpdateTeamRequest;
 import com.modelgate.common.domain.ApiKeyContext;
+import com.modelgate.common.domain.CredentialType;
 import com.modelgate.common.domain.BudgetPolicy;
 import com.modelgate.common.domain.ModelQuotaPolicy;
 import com.modelgate.common.domain.QuotaMode;
@@ -62,10 +63,10 @@ public class AdminRepository {
         long orgId = requireId("SELECT id FROM organization WHERE name = ?", DEMO_ORGANIZATION_NAME);
 
         jdbcTemplate.update("""
-                        INSERT IGNORE INTO team(organization_id, name, key_rpm, team_rpm, team_concurrency, model_concurrency, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT IGNORE INTO team(organization_id, name, key_rpm, team_rpm, team_tpm, key_concurrency, team_concurrency, model_concurrency, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                orgId, DEMO_TEAM_NAME, 60, 600, 20, 50, JdbcTime.toTimestamp(now));
+                orgId, DEMO_TEAM_NAME, 60, 600, 120000, 5, 20, 50, JdbcTime.toTimestamp(now));
         long teamId = requireId("SELECT id FROM team WHERE organization_id = ? AND name = ?", orgId, DEMO_TEAM_NAME);
 
         jdbcTemplate.update("""
@@ -199,13 +200,15 @@ public class AdminRepository {
         try {
             long teamId = GeneratedKeys.insert(jdbcTemplate, """
                             INSERT INTO team(
-                                organization_id, name, key_rpm, team_rpm, team_concurrency, model_concurrency, enabled, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                organization_id, name, key_rpm, team_rpm, team_tpm, key_concurrency, team_concurrency, model_concurrency, enabled, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                     request.organizationId(),
                     request.name(),
                     defaultInt(request.keyRpm(), 60),
                     defaultInt(request.teamRpm(), 600),
+                    defaultInt(request.teamTpm(), 120000),
+                    defaultInt(request.keyConcurrency(), 5),
                     defaultInt(request.teamConcurrency(), 20),
                     defaultInt(request.modelConcurrency(), 50),
                     1,
@@ -330,6 +333,8 @@ public class AdminRepository {
                         SET name = COALESCE(NULLIF(?, ''), name),
                             key_rpm = COALESCE(?, key_rpm),
                             team_rpm = COALESCE(?, team_rpm),
+                            team_tpm = COALESCE(?, team_tpm),
+                            key_concurrency = COALESCE(?, key_concurrency),
                             team_concurrency = COALESCE(?, team_concurrency),
                             model_concurrency = COALESCE(?, model_concurrency),
                             enabled = COALESCE(?, enabled)
@@ -338,6 +343,8 @@ public class AdminRepository {
                 request.name(),
                 request.keyRpm(),
                 request.teamRpm(),
+                request.teamTpm(),
+                request.keyConcurrency(),
                 request.teamConcurrency(),
                 request.modelConcurrency(),
                 request.enabled() == null ? null : (request.enabled() ? 1 : 0),
@@ -449,12 +456,19 @@ public class AdminRepository {
 
     public Optional<ApiKeyContext> findApiKeyContextByHash(String keyHash) {
         try {
+            String credentialType = jdbcTemplate.queryForObject("SELECT credential_type FROM virtual_api_key WHERE key_hash = ?", String.class, keyHash);
+            if (CredentialType.APPLICATION.name().equals(credentialType)) {
+                return applicationApiKeyContext(keyHash);
+            }
             ApiKeyContext base = jdbcTemplate.queryForObject("""
                             SELECT
                                 k.id key_id,
                                 k.organization_id,
                                 k.team_id,
                                 k.owner_member_id,
+                                k.credential_type,
+                                k.project_id,
+                                k.service_account_id,
                                 q.id quota_account_id,
                                 COALESCE((SELECT GROUP_CONCAT(mma.model_name ORDER BY mma.model_name SEPARATOR ',')
                                           FROM member_model_access mma
@@ -466,6 +480,8 @@ public class AdminRepository {
                                 k.expires_at,
                                 t.key_rpm,
                                 t.team_rpm,
+                                t.team_tpm,
+                                t.key_concurrency,
                                 t.team_concurrency,
                                 t.model_concurrency,
                                 COALESCE(q.available_tokens, 0) available_tokens
@@ -473,7 +489,7 @@ public class AdminRepository {
                             JOIN team t ON t.id = k.team_id
                             JOIN team_member m ON m.id = k.owner_member_id
                             JOIN platform_user u ON u.id = m.user_id
-                            LEFT JOIN quota_account q ON q.account_type = 'MEMBER' AND q.owner_id = m.id
+                            LEFT JOIN quota_account q ON q.account_type = 'MEMBER_DEVELOPMENT' AND q.owner_id = m.id
                             WHERE k.key_hash = ?
                             """,
                     (rs, rowNum) -> new ApiKeyContext(
@@ -488,30 +504,59 @@ public class AdminRepository {
                             new RateLimitPolicy(
                                     rs.getInt("key_rpm"),
                                     rs.getInt("team_rpm"),
+                                    rs.getInt("team_tpm"),
+                                    rs.getInt("key_concurrency"),
                                     rs.getInt("team_concurrency"),
                                     rs.getInt("model_concurrency")),
                             new BudgetPolicy(rs.getLong("available_tokens")),
                             rs.getInt("enabled") == 1,
-                            JdbcTime.toOffsetDateTime(rs.getTimestamp("expires_at"))
+                            JdbcTime.toOffsetDateTime(rs.getTimestamp("expires_at")),
+                            CredentialType.valueOf(rs.getString("credential_type")),
+                            nullableLong(rs.getObject("project_id")),
+                            nullableLong(rs.getObject("service_account_id"))
                     ), keyHash);
             Map<String, ModelQuotaPolicy> teamPolicies = modelPolicies(base.teamId(), null);
             Map<String, ModelQuotaPolicy> memberPolicies = modelPolicies(base.teamId(), base.memberId());
             memberPolicies.keySet().removeIf(model -> !teamPolicies.containsKey(model));
             return Optional.of(new ApiKeyContext(base.keyId(), base.organizationId(), base.teamId(), base.memberId(), base.quotaAccountId(),
-                    Set.copyOf(memberPolicies.keySet()), teamPolicies, memberPolicies, base.rateLimitPolicy(), base.budgetPolicy(), base.enabled(), base.expiresAt()));
+                    Set.copyOf(memberPolicies.keySet()), teamPolicies, memberPolicies, base.rateLimitPolicy(), base.budgetPolicy(), base.enabled(), base.expiresAt(),
+                    base.credentialType(), base.projectId(), base.serviceAccountId()));
         } catch (EmptyResultDataAccessException ex) {
             return Optional.empty();
         }
     }
 
-    private Map<String, ModelQuotaPolicy> modelPolicies(long teamId, Long memberId) {
+    private Optional<ApiKeyContext> applicationApiKeyContext(String keyHash) {
+        try {
+            ApiKeyContext base = jdbcTemplate.queryForObject("""
+                    SELECT k.id key_id,k.organization_id,k.team_id,k.project_id,k.service_account_id,
+                      q.id quota_account_id,k.enabled,k.expires_at,t.key_rpm,t.team_rpm,t.team_tpm,t.key_concurrency,t.team_concurrency,t.model_concurrency,
+                      COALESCE(q.available_tokens,0) available_tokens
+                    FROM virtual_api_key k JOIN project p ON p.id=k.project_id AND p.team_id=k.team_id AND p.enabled=1
+                      JOIN project_service_account sa ON sa.id=k.service_account_id AND sa.project_id=p.id AND sa.enabled=1
+                      JOIN team t ON t.id=k.team_id AND t.enabled=1 AND t.status='ACTIVE'
+                      LEFT JOIN quota_account q ON q.account_type='PROJECT_APPLICATION' AND q.owner_id=p.id
+                    WHERE k.key_hash=? AND k.credential_type='APPLICATION'
+                    """,(rs,row)->new ApiKeyContext(rs.getLong("key_id"),rs.getLong("organization_id"),rs.getLong("team_id"),null,
+                    rs.getLong("quota_account_id"),Set.of(),Map.of(),Map.of(),new RateLimitPolicy(rs.getInt("key_rpm"),rs.getInt("team_rpm"),rs.getInt("team_tpm"),rs.getInt("key_concurrency"),rs.getInt("team_concurrency"),rs.getInt("model_concurrency")),
+                    new BudgetPolicy(rs.getLong("available_tokens")),rs.getInt("enabled")==1,JdbcTime.toOffsetDateTime(rs.getTimestamp("expires_at")),CredentialType.APPLICATION,
+                    rs.getLong("project_id"),rs.getLong("service_account_id")),keyHash);
+            Map<String, ModelQuotaPolicy> team = modelPolicies(base.teamId(), null, "APPLICATION", null);
+            Map<String, ModelQuotaPolicy> project = modelPolicies(base.teamId(), null, "APPLICATION", base.projectId());
+            project.keySet().removeIf(model -> !team.containsKey(model));
+            return Optional.of(new ApiKeyContext(base.keyId(),base.organizationId(),base.teamId(),null,base.quotaAccountId(),Set.copyOf(project.keySet()),team,project,base.rateLimitPolicy(),base.budgetPolicy(),base.enabled(),base.expiresAt(),CredentialType.APPLICATION,base.projectId(),base.serviceAccountId()));
+        } catch (EmptyResultDataAccessException ex) { return Optional.empty(); }
+    }
+
+    private Map<String, ModelQuotaPolicy> modelPolicies(long teamId, Long memberId) { return modelPolicies(teamId, memberId, "DEVELOPMENT", null); }
+    private Map<String, ModelQuotaPolicy> modelPolicies(long teamId, Long memberId, String poolType, Long projectId) {
         Map<String, ModelQuotaPolicy> result = new LinkedHashMap<>();
-        String sql = memberId == null
-                ? "SELECT id, model_name, quota_mode, quota_limit FROM model_entitlement_grant WHERE team_id = ? AND member_id IS NULL AND status = 'ACTIVE'"
-                : "SELECT id, model_name, quota_mode, quota_limit FROM model_entitlement_grant WHERE team_id = ? AND member_id = ? AND status = 'ACTIVE'";
-        Object[] args = memberId == null ? new Object[]{teamId} : new Object[]{teamId, memberId};
+        String sql; Object[] args;
+        if (projectId != null) { sql="SELECT id,model_name,quota_mode,quota_limit,alert_remaining_percent FROM model_entitlement_grant WHERE team_id=? AND project_id=? AND pool_type=? AND status='ACTIVE'"; args=new Object[]{teamId,projectId,poolType}; }
+        else if (memberId == null) { sql="SELECT id,model_name,quota_mode,quota_limit,alert_remaining_percent FROM model_entitlement_grant WHERE team_id=? AND member_id IS NULL AND project_id IS NULL AND pool_type=? AND status='ACTIVE'"; args=new Object[]{teamId,poolType}; }
+        else { sql="SELECT id,model_name,quota_mode,quota_limit,alert_remaining_percent FROM model_entitlement_grant WHERE team_id=? AND member_id=? AND pool_type=? AND status='ACTIVE'"; args=new Object[]{teamId,memberId,poolType}; }
         jdbcTemplate.query(sql, (org.springframework.jdbc.core.RowCallbackHandler) rs -> result.put(rs.getString("model_name"), new ModelQuotaPolicy(rs.getLong("id"), rs.getString("model_name"),
-                QuotaMode.valueOf(rs.getString("quota_mode")), nullableLong(rs.getObject("quota_limit")))), args);
+                QuotaMode.valueOf(rs.getString("quota_mode")), nullableLong(rs.getObject("quota_limit")), nullableInt(rs.getObject("alert_remaining_percent")))), args);
         return result;
     }
 
@@ -525,6 +570,8 @@ public class AdminRepository {
                     t.enabled,
                     t.key_rpm,
                     t.team_rpm,
+                    t.team_tpm,
+                    t.key_concurrency,
                     t.team_concurrency,
                     t.model_concurrency,
                     t.owner_user_id,
@@ -546,6 +593,8 @@ public class AdminRepository {
                 rs.getInt("enabled") == 1,
                 rs.getInt("key_rpm"),
                 rs.getInt("team_rpm"),
+                rs.getInt("team_tpm"),
+                rs.getInt("key_concurrency"),
                 rs.getInt("team_concurrency"),
                 rs.getInt("model_concurrency"),
                 nullableLong(rs.getObject("owner_member_id")),
@@ -672,6 +721,10 @@ public class AdminRepository {
             return null;
         }
         return ((Number) value).longValue();
+    }
+
+    private static Integer nullableInt(Object value) {
+        return value == null ? null : ((Number) value).intValue();
     }
 
     private record MemberKeyScope(long organizationId, long teamId) {

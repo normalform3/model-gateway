@@ -1,29 +1,30 @@
 package com.modelgate.billing;
 
-import com.modelgate.common.event.UsageReportedEvent;
+import com.modelgate.common.event.UsageCompletedEvent;
+import com.modelgate.infrastructure.db.UsageEventConsumerRepository;
 import com.modelgate.infrastructure.db.BillingRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class BillingService {
-    private static final String CONSUMER_GROUP = "modelgate-billing-consumer";
+    public static final String CONSUMER_GROUP = "modelgate-billing-consumer";
 
     private final BillingRepository billingRepository;
+    private final UsageEventConsumerRepository consumers;
 
-    public BillingService(BillingRepository billingRepository) {
+    public BillingService(BillingRepository billingRepository, UsageEventConsumerRepository consumers) {
         this.billingRepository = billingRepository;
+        this.consumers = consumers;
     }
 
     @Transactional
-    public void consume(UsageReportedEvent event) {
-        if (!billingRepository.markConsumed(event.eventId(), CONSUMER_GROUP)) {
+    public void consume(UsageCompletedEvent event) {
+        if (!consumers.markConsumed(event.eventId(), CONSUMER_GROUP)) {
             return;
         }
-        billingRepository.insertUsage(event);
         if ("SUCCESS".equals(event.status())) {
             billingRepository.insertBilling(event);
-            billingRepository.insertQuotaConsumeTransaction(event);
         }
     }
 }

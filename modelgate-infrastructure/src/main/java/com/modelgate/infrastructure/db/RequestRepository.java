@@ -29,9 +29,9 @@ public class RequestRepository {
         jdbcTemplate.update("""
                         INSERT INTO ai_request(
                             request_id, test_run_id, organization_id, team_id, api_key_id,
-                            member_id, requested_model, actual_provider, actual_model, stream_enabled,
+                            member_id, credential_type, project_id, service_account_id, requested_model, actual_provider, actual_model, stream_enabled,
                             input_tokens, estimated_tokens, status, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 requestId,
                 testRunId,
@@ -39,6 +39,9 @@ public class RequestRepository {
                 context.teamId(),
                 context.keyId(),
                 context.memberId(),
+                context.credentialType().name(),
+                context.projectId(),
+                context.serviceAccountId(),
                 requestedModel,
                 target.provider(),
                 target.actualModel(),

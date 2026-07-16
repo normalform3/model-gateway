@@ -51,6 +51,9 @@ Organization 企业
 可靠消息：
 
 - `mq_consume_record`
+- `usage_event_outbox`
+- `budget_alert`
+- `audit_log`
 
 ## API Key 上下文
 
@@ -282,6 +285,12 @@ CREATE TABLE mq_consume_record (
 - 业务表唯一约束。
 
 不要只使用 Redis 去重，因为账单数据需要长期正确。
+
+## usage_event_outbox、budget_alert 与 audit_log
+
+请求终态与 `usage_event_outbox` 在同一 MySQL 事务中保存。Outbox 保存脱敏的 `UsageCompletedEvent` JSON、投递状态、租约和重试时间；只有 RocketMQ 成功确认后标记为已发送。
+
+`budget_alert` 以 `(grant_id, cycle_started_at, alert_remaining_percent)` 唯一，确保权益在一个周期内跨越同一阈值只告警一次。`audit_log` 只保存请求归属、模型、Token、状态和耗时，不保存 Prompt、响应内容、明文 Key 或 Provider 凭据。
 
 ## 三套事实
 

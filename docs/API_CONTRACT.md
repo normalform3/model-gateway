@@ -123,6 +123,8 @@ Content-Type: application/json
   "name": "AI Platform Team",
   "keyRpm": 60,
   "teamRpm": 600,
+  "teamTpm": 120000,
+  "keyConcurrency": 5,
   "teamConcurrency": 20,
   "modelConcurrency": 50,
   "ownerUserId": 101

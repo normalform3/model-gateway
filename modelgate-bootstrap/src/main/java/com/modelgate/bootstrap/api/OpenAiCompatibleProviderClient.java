@@ -45,13 +45,13 @@ public class OpenAiCompatibleProviderClient {
     }
 
     private Mono<ProviderResponse> completeAttempt(RouteTarget target, ProviderRequest request, Set<Long> excluded) {
-        ProviderCredentialService.ResolvedCredential credential = credentialService.select(target.providerId(), excluded);
+        ProviderCredentialService.ResolvedCredential credential = credentialService.select(target.providerId(), target.deploymentId(), excluded);
         return post(target, request, credential, false).map(this::toCompletion)
                 .onErrorResume(this::retryable, error -> completeAttempt(target, request, Set.of(credential.credentialId())));
     }
 
     private Flux<ProviderStreamChunk> streamAttempt(RouteTarget target, ProviderRequest request, Set<Long> excluded) {
-        ProviderCredentialService.ResolvedCredential credential = credentialService.select(target.providerId(), excluded);
+        ProviderCredentialService.ResolvedCredential credential = credentialService.select(target.providerId(), target.deploymentId(), excluded);
         AtomicBoolean emitted = new AtomicBoolean();
         return streamPost(target, request, credential).map(this::toChunk).doOnNext(chunk -> emitted.set(true))
                 .onErrorResume(error -> !emitted.get() && retryable(error), error -> streamAttempt(target, request, Set.of(credential.credentialId())));

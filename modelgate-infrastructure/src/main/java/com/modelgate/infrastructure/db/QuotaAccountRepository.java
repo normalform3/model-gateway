@@ -2,6 +2,7 @@ package com.modelgate.infrastructure.db;
 
 import com.modelgate.common.api.AdminDtos.QuotaResponse;
 import com.modelgate.common.api.AdminDtos.MemberQuotaResponse;
+import com.modelgate.common.api.AdminDtos.ApplicationQuotaBalanceResponse;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -17,7 +18,7 @@ public class QuotaAccountRepository {
         return jdbcTemplate.queryForObject("""
                         SELECT owner_id, available_tokens, frozen_tokens, consumed_tokens, updated_at
                         FROM quota_account
-                        WHERE account_type = 'TEAM' AND owner_id = ?
+                        WHERE account_type = 'TEAM_DEVELOPMENT' AND owner_id = ?
                         """,
                 (rs, rowNum) -> new QuotaResponse(
                         rs.getLong("owner_id"),
@@ -32,7 +33,7 @@ public class QuotaAccountRepository {
         return jdbcTemplate.queryForObject("""
                         SELECT owner_id, available_tokens, frozen_tokens, consumed_tokens, updated_at
                         FROM quota_account
-                        WHERE account_type = 'MEMBER' AND owner_id = ?
+                        WHERE account_type = 'MEMBER_DEVELOPMENT' AND owner_id = ?
                         """,
                 (rs, rowNum) -> new MemberQuotaResponse(
                         rs.getLong("owner_id"),
@@ -41,6 +42,29 @@ public class QuotaAccountRepository {
                         rs.getLong("consumed_tokens"),
                         JdbcTime.toOffsetDateTime(rs.getTimestamp("updated_at"))),
                 memberId);
+    }
+
+    public ApplicationQuotaBalanceResponse findTeamApplicationQuota(long teamId) {
+        return applicationQuota("TEAM_APPLICATION", teamId);
+    }
+
+    public ApplicationQuotaBalanceResponse findProjectApplicationQuota(long projectId) {
+        return applicationQuota("PROJECT_APPLICATION", projectId);
+    }
+
+    private ApplicationQuotaBalanceResponse applicationQuota(String accountType, long ownerId) {
+        return jdbcTemplate.queryForObject("""
+                        SELECT owner_id, available_tokens, frozen_tokens, consumed_tokens, updated_at
+                        FROM quota_account
+                        WHERE account_type = ? AND owner_id = ?
+                        """,
+                (rs, rowNum) -> new ApplicationQuotaBalanceResponse(
+                        rs.getLong("owner_id"),
+                        rs.getLong("available_tokens"),
+                        rs.getLong("frozen_tokens"),
+                        rs.getLong("consumed_tokens"),
+                        JdbcTime.toOffsetDateTime(rs.getTimestamp("updated_at"))),
+                accountType, ownerId);
     }
 
     public void syncRedisSettlement(long accountId, int estimatedTokens, int actualTokens) {

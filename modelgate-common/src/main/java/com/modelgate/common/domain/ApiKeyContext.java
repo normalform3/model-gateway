@@ -16,7 +16,10 @@ public record ApiKeyContext(
         RateLimitPolicy rateLimitPolicy,
         BudgetPolicy budgetPolicy,
         boolean enabled,
-        OffsetDateTime expiresAt
+        OffsetDateTime expiresAt,
+        CredentialType credentialType,
+        Long projectId,
+        Long serviceAccountId
 ) {
     public boolean modelAllowed(String model) {
         return allowedModels != null && allowedModels.contains(model);

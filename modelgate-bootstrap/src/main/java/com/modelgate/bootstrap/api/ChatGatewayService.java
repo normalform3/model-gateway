@@ -12,7 +12,7 @@ import com.modelgate.common.domain.RequestStatus;
 import com.modelgate.common.domain.RouteTarget;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
-import com.modelgate.common.event.UsageReportedEvent;
+import com.modelgate.common.event.QuotaSettlementSnapshot;
 import com.modelgate.infrastructure.db.RequestRepository;
 import com.modelgate.infrastructure.db.RouteRepository;
 import com.modelgate.provider.ProviderRegistry;
@@ -21,7 +21,7 @@ import com.modelgate.provider.ProviderResponse;
 import com.modelgate.provider.ProviderStreamChunk;
 import com.modelgate.quota.QuotaService;
 import com.modelgate.quota.TokenEstimator;
-import com.modelgate.usage.UsageEventPublisher;
+import com.modelgate.usage.UsageCompletedOutboxService;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
@@ -33,6 +33,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -44,7 +45,7 @@ public class ChatGatewayService {
     private final ProviderRegistry providerRegistry;
     private final TokenEstimator tokenEstimator;
     private final QuotaService quotaService;
-    private final UsageEventPublisher usageEventPublisher;
+    private final UsageCompletedOutboxService usageCompletedOutboxService;
     private final StringRedisTemplate redisTemplate;
     private final OpenAiCompatibleProviderClient openAiCompatibleProviderClient;
     private final TestObservabilityService testObservabilityService;
@@ -56,7 +57,7 @@ public class ChatGatewayService {
             ProviderRegistry providerRegistry,
             TokenEstimator tokenEstimator,
             QuotaService quotaService,
-            UsageEventPublisher usageEventPublisher,
+            UsageCompletedOutboxService usageCompletedOutboxService,
             StringRedisTemplate redisTemplate,
             OpenAiCompatibleProviderClient openAiCompatibleProviderClient,
             TestObservabilityService testObservabilityService
@@ -67,7 +68,7 @@ public class ChatGatewayService {
         this.providerRegistry = providerRegistry;
         this.tokenEstimator = tokenEstimator;
         this.quotaService = quotaService;
-        this.usageEventPublisher = usageEventPublisher;
+        this.usageCompletedOutboxService = usageCompletedOutboxService;
         this.redisTemplate = redisTemplate;
         this.openAiCompatibleProviderClient = openAiCompatibleProviderClient;
         this.testObservabilityService = testObservabilityService;
@@ -81,13 +82,14 @@ public class ChatGatewayService {
                     ApiKeyContext apiKey = ctx.apiKey();
                     RouteTarget target = ctx.target();
                     QuotaReservation reservation = ctx.reservation();
+                    AtomicBoolean terminal = new AtomicBoolean();
                     return completeProvider(target, new ProviderRequest(requestId, request.model(), target.actualModel(), request))
                             .flatMap(response -> Mono.fromCallable(() -> {
+                                if (!terminal.compareAndSet(false, true)) throw new IllegalStateException("Request already finalized.");
                                 Usage usage = normalizedUsage(response, request, reservation);
                                 long durationMs = System.currentTimeMillis() - start;
-                                quotaService.settle(apiKey, target, reservation, usage.totalTokens());
-                                requestRepository.complete(requestId, RequestStatus.SUCCESS, usage.promptTokens(), usage.completionTokens(), durationMs, null, null);
-                                publish(apiKey, target, requestId, usage, durationMs, RequestStatus.SUCCESS);
+                                List<QuotaSettlementSnapshot> settlements = quotaService.settle(apiKey, request.model(), reservation, usage.totalTokens());
+                                usageCompletedOutboxService.complete(apiKey, target, requestId, request.model(), usage, durationMs, null, RequestStatus.SUCCESS, null, settlements);
                                 return new ChatCompletionResponse(
                                         requestId,
                                         "chat.completion",
@@ -96,7 +98,7 @@ public class ChatGatewayService {
                                         List.of(new ChatCompletionResponse.Choice(0, response.message(), "stop")),
                                         usage);
                             }).subscribeOn(Schedulers.boundedElastic()))
-                            .onErrorResume(ex -> fail(apiKey, target, reservation, requestId, start, ex).then(Mono.error(ex)));
+                            .onErrorResume(ex -> fail(apiKey, target, request.model(), reservation, requestId, start, ex, terminal).then(Mono.error(ex)));
                 });
     }
 
@@ -112,16 +114,19 @@ public class ChatGatewayService {
                     ApiKeyContext apiKey = ctx.apiKey();
                     RouteTarget target = ctx.target();
                     QuotaReservation reservation = ctx.reservation();
+                    AtomicBoolean terminal = new AtomicBoolean();
                     return streamProvider(target, new ProviderRequest(requestId, request.model(), target.actualModel(), request))
                             .concatMap(chunk -> toSse(requestId, request, chunk, firstTokenMs, usageRef, content)
                                     .flatMap(event -> {
                                         if (!chunk.done()) {
                                             return Mono.just(event);
                                         }
-                                        return finishStream(apiKey, target, reservation, requestId, start, firstTokenMs, usageRef, content)
+                                        return finishStream(apiKey, target, request.model(), reservation, requestId, start, firstTokenMs, usageRef, content, terminal)
                                                 .thenReturn(event);
                                     }))
-                            .onErrorResume(ex -> fail(apiKey, target, reservation, requestId, start, ex).then(Mono.error(ex)));
+                            .onErrorResume(ex -> fail(apiKey, target, request.model(), reservation, requestId, start, ex, terminal).then(Mono.error(ex)))
+                            .doOnCancel(() -> fail(apiKey, target, request.model(), reservation, requestId, start,
+                                    new ModelGateException(ErrorCode.INTERNAL_ERROR, "Client cancelled stream."), terminal).subscribe());
                 });
     }
 
@@ -130,12 +135,18 @@ public class ChatGatewayService {
             ApiKeyContext apiKey = virtualKeyService.authenticate(authorization);
             virtualKeyService.assertModelAllowed(apiKey, request.model());
             reserveIdempotency(apiKey, idempotencyKey);
-            RouteTarget target = routeRepository.findFirstTarget(request.model())
-                    .orElseThrow(() -> new ModelGateException(ErrorCode.MODEL_ROUTE_NOT_FOUND, "No route target for model: " + request.model(), requestId));
-            String resolvedTestRunId = testObservabilityService.resolveRunId(apiKey, testRunId, target);
             int inputTokens = tokenEstimator.estimateInputTokens(request);
             int maxOutputTokens = tokenEstimator.maxOutputTokens(request);
-            QuotaReservation reservation = quotaService.reserve(apiKey, target, requestId, inputTokens, maxOutputTokens);
+            QuotaReservation reservation = quotaService.reserve(apiKey, request.model(), requestId, inputTokens, maxOutputTokens);
+            RouteTarget target;
+            try {
+                target = routeRepository.findFirstTarget(request.model())
+                        .orElseThrow(() -> new ModelGateException(ErrorCode.MODEL_ROUTE_NOT_FOUND, "No route target for model: " + request.model(), requestId));
+            } catch (RuntimeException ex) {
+                quotaService.release(apiKey, request.model(), reservation);
+                throw ex;
+            }
+            String resolvedTestRunId = testObservabilityService.resolveRunId(apiKey, testRunId, target);
             requestRepository.insertStarted(requestId, apiKey, request.model(), target, request.streamEnabled(), inputTokens, reservation.estimatedTokens(), resolvedTestRunId);
             return new PreparedRequest(apiKey, target, reservation);
         }).subscribeOn(Schedulers.boundedElastic());
@@ -185,33 +196,36 @@ public class ChatGatewayService {
     private Mono<Void> finishStream(
             ApiKeyContext apiKey,
             RouteTarget target,
+            String requestedModel,
             QuotaReservation reservation,
             String requestId,
             long start,
             AtomicLong firstTokenAt,
             AtomicReference<Usage> usageRef,
-            StringBuilder content
+            StringBuilder content,
+            AtomicBoolean terminal
     ) {
         return Mono.fromRunnable(() -> {
+            if (!terminal.compareAndSet(false, true)) return;
             Usage usage = usageRef.get();
             if (usage == null) {
                 usage = Usage.of(reservation.inputTokens(), estimateOutputTokens(content.toString()));
             }
             long durationMs = System.currentTimeMillis() - start;
             Long firstTokenMs = firstTokenAt.get() < 0 ? null : firstTokenAt.get() - start;
-            quotaService.settle(apiKey, target, reservation, usage.totalTokens());
-            requestRepository.complete(requestId, RequestStatus.SUCCESS, usage.promptTokens(), usage.completionTokens(), durationMs, firstTokenMs, null);
-            publish(apiKey, target, requestId, usage, durationMs, RequestStatus.SUCCESS);
+            List<QuotaSettlementSnapshot> settlements = quotaService.settle(apiKey, requestedModel, reservation, usage.totalTokens());
+            usageCompletedOutboxService.complete(apiKey, target, requestId, requestedModel, usage, durationMs, firstTokenMs, RequestStatus.SUCCESS, null, settlements);
         }).subscribeOn(Schedulers.boundedElastic()).then();
     }
 
-    private Mono<Void> fail(ApiKeyContext apiKey, RouteTarget target, QuotaReservation reservation, String requestId, long start, Throwable ex) {
+    private Mono<Void> fail(ApiKeyContext apiKey, RouteTarget target, String requestedModel, QuotaReservation reservation, String requestId, long start, Throwable ex, AtomicBoolean terminal) {
         return Mono.fromRunnable(() -> {
-            quotaService.release(apiKey, target, reservation);
+            if (!terminal.compareAndSet(false, true)) return;
+            List<QuotaSettlementSnapshot> settlements = quotaService.release(apiKey, requestedModel, reservation);
             ErrorCode errorCode = ex instanceof ModelGateException mge ? mge.errorCode() : ErrorCode.INTERNAL_ERROR;
             long durationMs = System.currentTimeMillis() - start;
-            requestRepository.complete(requestId, RequestStatus.FAILED, reservation.inputTokens(), 0, durationMs, null, errorCode.name());
-            publish(apiKey, target, requestId, Usage.of(reservation.inputTokens(), 0), durationMs, RequestStatus.FAILED);
+            RequestStatus status = "Client cancelled stream.".equals(ex.getMessage()) ? RequestStatus.CANCELLED : RequestStatus.FAILED;
+            usageCompletedOutboxService.complete(apiKey, target, requestId, requestedModel, Usage.of(reservation.inputTokens(), 0), durationMs, null, status, errorCode.name(), settlements);
         }).subscribeOn(Schedulers.boundedElastic()).then();
     }
 
@@ -225,24 +239,6 @@ public class ChatGatewayService {
 
     private int estimateOutputTokens(String text) {
         return Math.max(1, (int) Math.ceil((text == null ? 0 : text.length()) / 4.0));
-    }
-
-    private void publish(ApiKeyContext apiKey, RouteTarget target, String requestId, Usage usage, long durationMs, RequestStatus status) {
-        usageEventPublisher.publish(new UsageReportedEvent(
-                "evt-" + UUID.randomUUID(),
-                requestId,
-                apiKey.organizationId(),
-                apiKey.teamId(),
-                apiKey.memberId(),
-                apiKey.keyId(),
-                target.provider(),
-                target.actualModel(),
-                usage.promptTokens(),
-                usage.completionTokens(),
-                usage.totalTokens(),
-                durationMs,
-                status.name(),
-                OffsetDateTime.now()));
     }
 
     private void reserveIdempotency(ApiKeyContext apiKey, String idempotencyKey) {

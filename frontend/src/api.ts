@@ -44,6 +44,10 @@ export interface TeamEntitlement { requestId: number; teamId: number; ownerMembe
 export interface MemberAccess { memberId: number; quotaAccountId: number; availableTokens: number; modelNames: string[] }
 export interface MemberKeyStatus { keyId: number | null; keyPrefix: string | null; enabled: boolean; reissueRequired: boolean; createdAt: string | null }
 export interface QuotaBalance { availableTokens: number; frozenTokens: number; consumedTokens: number; updatedAt: string }
+export interface ProjectItem { projectId: number; teamId: number; name: string; projectCode: string; enabled: boolean; createdAt: string }
+export interface ProjectServiceAccountStatus { serviceAccountId: number; projectId: number; name: string; enabled: boolean; createdAt: string; keyId: number | null; keyPrefix: string | null; keyEnabled: boolean; keyCreatedAt: string | null }
+export interface ApplicationQuotaOverview { teamId: number; balance: QuotaBalance; modelEntitlements: ModelEntitlement[] }
+export interface ProjectApplicationQuotaOverview { projectId: number; balance: QuotaBalance; modelEntitlements: ModelEntitlement[] }
 export interface BillingSummary { scopeId: number; totalTokens: number; totalAmount: number; currency: string; recordCount: number }
 export type QuotaMode = "DAILY" | "WEEKLY" | "UNLIMITED";
 export interface ModelEntitlement { grantId: number; teamId: number; memberId: number | null; modelName: string; quotaMode: QuotaMode; quotaLimit: number | null; status: string; consumedTokens: number; frozenTokens: number; remainingTokens: number | null; cycleStartedAt: string; reason: string; createdAt: string; revokedAt: string | null }
@@ -107,6 +111,18 @@ export const api = {
   rotateMemberKey: (memberId: number) => requestJson<CreateApiKeyResponse>(`/admin/members/${memberId}/api-keys/rotate`, { method: "POST" }),
   teamQuota: (teamId: number) => requestJson<QuotaBalance>(`/admin/teams/${teamId}/quota`),
   memberQuota: (memberId: number) => requestJson<QuotaBalance>(`/admin/members/${memberId}/quota`),
+  teamApplicationQuota: (teamId: number) => requestJson<ApplicationQuotaOverview>(`/admin/teams/${teamId}/application-quota`),
+  projects: (teamId: number) => requestJson<{ items: ProjectItem[] }>(`/admin/teams/${teamId}/projects`),
+  createProject: (teamId: number, payload: Record<string, unknown>) => requestJson<ProjectItem>(`/admin/teams/${teamId}/projects`, { method: "POST", body: JSON.stringify(payload) }),
+  updateProject: (teamId: number, projectId: number, payload: Record<string, unknown>) => requestJson<ProjectItem>(`/admin/teams/${teamId}/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  grantTeamApplicationPool: (teamId: number, payload: Record<string, unknown>) => requestJson<void>(`/admin/teams/${teamId}/application-entitlements`, { method: "POST", body: JSON.stringify(payload) }),
+  projectApplicationQuota: (teamId: number, projectId: number) => requestJson<ProjectApplicationQuotaOverview>(`/admin/teams/${teamId}/projects/${projectId}/application-quota`),
+  allocateProjectQuota: (teamId: number, projectId: number, payload: Record<string, unknown>) => requestJson<{ projectId: number; quotaAccountId: number; availableTokens: number; modelNames: string[] }>(`/admin/teams/${teamId}/projects/${projectId}/quota-allocations`, { method: "POST", body: JSON.stringify(payload) }),
+  projectServiceAccounts: (teamId: number, projectId: number) => requestJson<{ items: ProjectServiceAccountStatus[] }>(`/admin/teams/${teamId}/projects/${projectId}/service-accounts`),
+  createProjectServiceAccount: (teamId: number, projectId: number, payload: Record<string, unknown>) => requestJson<ProjectServiceAccountStatus>(`/admin/teams/${teamId}/projects/${projectId}/service-accounts`, { method: "POST", body: JSON.stringify(payload) }),
+  updateProjectServiceAccount: (teamId: number, projectId: number, serviceAccountId: number, payload: Record<string, unknown>) => requestJson<ProjectServiceAccountStatus>(`/admin/teams/${teamId}/projects/${projectId}/service-accounts/${serviceAccountId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  generateApplicationKey: (serviceAccountId: number) => requestJson<CreateApiKeyResponse>(`/admin/project-service-accounts/${serviceAccountId}/api-keys/generate`, { method: "POST" }),
+  rotateApplicationKey: (serviceAccountId: number) => requestJson<CreateApiKeyResponse>(`/admin/project-service-accounts/${serviceAccountId}/api-keys/rotate`, { method: "POST" }),
   teamBillingSummary: (teamId: number) => requestJson<BillingSummary>(`/admin/teams/${teamId}/billing-summary`),
   memberBillingSummary: (memberId: number) => requestJson<BillingSummary>(`/admin/members/${memberId}/billing-summary`),
   teamModelEntitlements: (teamId: number) => requestJson<{ items: ModelEntitlement[] }>(`/admin/teams/${teamId}/model-entitlements`),

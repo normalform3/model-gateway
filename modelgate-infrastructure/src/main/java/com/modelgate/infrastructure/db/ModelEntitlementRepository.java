@@ -6,6 +6,7 @@ import com.modelgate.common.domain.ModelQuotaPolicy;
 import com.modelgate.common.domain.QuotaMode;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
+import com.modelgate.common.event.QuotaSettlementSnapshot;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -40,7 +41,8 @@ public class ModelEntitlementRepository {
         if (mode != QuotaMode.UNLIMITED && activeMemberLimits(teamId, modelName) > request.quotaLimit()) {
             throw bad("The team limit is lower than active member allocations for this model.");
         }
-        long id = upsert(teamId, null, modelName, mode, request.quotaLimit(), request.reason());
+        validateAlertThreshold(request.alertRemainingPercent());
+        long id = upsert(teamId, null, modelName, mode, request.quotaLimit(), request.alertRemainingPercent(), request.reason());
         return item(id);
     }
 
@@ -55,7 +57,8 @@ public class ModelEntitlementRepository {
         if (parent.mode() != QuotaMode.UNLIMITED && activeMemberLimitsExcept(teamId, memberId, modelName) + request.quotaLimit() > parent.limit()) {
             throw bad("Member allocations exceed the team limit for this model.");
         }
-        long id = upsert(teamId, memberId, modelName, mode, request.quotaLimit(), request.reason());
+        validateAlertThreshold(request.alertRemainingPercent());
+        long id = upsert(teamId, memberId, modelName, mode, request.quotaLimit(), request.alertRemainingPercent(), request.reason());
         return item(id);
     }
 
@@ -75,12 +78,14 @@ public class ModelEntitlementRepository {
         return grantIds;
     }
 
-    public ModelEntitlementListResponse teamEntitlements(long teamId) { return new ModelEntitlementListResponse(list("team_id = ? AND member_id IS NULL", teamId)); }
-    public ModelEntitlementListResponse memberEntitlements(long teamId, long memberId) { return new ModelEntitlementListResponse(list("team_id = ? AND member_id = ?", teamId, memberId)); }
+    public ModelEntitlementListResponse teamEntitlements(long teamId) { return new ModelEntitlementListResponse(list("team_id = ? AND member_id IS NULL AND project_id IS NULL AND pool_type = 'DEVELOPMENT'", teamId)); }
+    public ModelEntitlementListResponse memberEntitlements(long teamId, long memberId) { return new ModelEntitlementListResponse(list("team_id = ? AND member_id = ? AND pool_type = 'DEVELOPMENT'", teamId, memberId)); }
+    public ModelEntitlementListResponse teamApplicationEntitlements(long teamId) { return new ModelEntitlementListResponse(list("team_id = ? AND member_id IS NULL AND project_id IS NULL AND pool_type = 'APPLICATION'", teamId)); }
+    public ModelEntitlementListResponse projectApplicationEntitlements(long teamId, long projectId) { return new ModelEntitlementListResponse(list("team_id = ? AND project_id = ? AND pool_type = 'APPLICATION'", teamId, projectId)); }
 
     public RuntimePolicies runtimePolicies(long teamId, long memberId) {
-        Map<String, ModelQuotaPolicy> teams = policies("team_id = ? AND member_id IS NULL AND status = 'ACTIVE'", teamId);
-        Map<String, ModelQuotaPolicy> members = policies("team_id = ? AND member_id = ? AND status = 'ACTIVE'", teamId, memberId);
+        Map<String, ModelQuotaPolicy> teams = policies("team_id = ? AND member_id IS NULL AND project_id IS NULL AND pool_type = 'DEVELOPMENT' AND status = 'ACTIVE'", teamId);
+        Map<String, ModelQuotaPolicy> members = policies("team_id = ? AND member_id = ? AND pool_type = 'DEVELOPMENT' AND status = 'ACTIVE'", teamId, memberId);
         members.keySet().removeIf(model -> !teams.containsKey(model));
         return new RuntimePolicies(teams, members);
     }
@@ -98,22 +103,30 @@ public class ModelEntitlementRepository {
     @Transactional
     public void release(ModelQuotaPolicy policy, String cycleStart, int estimated) { mutateUsage(policy, cycleStart, estimated, 0, true); }
 
+    /** Applies the final ledger mutation after the gateway has already settled Redis. */
+    @Transactional
+    public void applySettlement(QuotaSettlementSnapshot settlement) {
+        ModelQuotaPolicy policy = new ModelQuotaPolicy(settlement.grantId(), settlement.modelName(),
+                QuotaMode.valueOf(settlement.quotaMode()), settlement.quotaLimit(), settlement.alertRemainingPercent());
+        mutateUsage(policy, settlement.cycleStartedAt().toString(), settlement.estimatedTokens(), settlement.actualTokens(), settlement.released());
+    }
+
     public UsageDashboard teamDashboard(long teamId) {
-        return new UsageDashboard(teamId, list("team_id = ? AND member_id IS NULL", teamId), trends("u.team_id = ?", teamId), ranking(teamId));
+        return new UsageDashboard(teamId, list("team_id = ? AND member_id IS NULL AND project_id IS NULL AND pool_type = 'DEVELOPMENT'", teamId), trends("u.team_id = ? AND u.credential_type = 'DEVELOPER'", teamId), ranking(teamId));
     }
     public UsageDashboard memberDashboard(long memberId) {
         Long teamId = jdbc.queryForObject("SELECT team_id FROM team_member WHERE id = ?", Long.class, memberId);
-        return new UsageDashboard(memberId, list("team_id = ? AND member_id = ?", teamId, memberId), trends("u.member_id = ?", memberId), List.of());
+        return new UsageDashboard(memberId, list("team_id = ? AND member_id = ? AND pool_type = 'DEVELOPMENT'", teamId, memberId), trends("u.member_id = ? AND u.credential_type = 'DEVELOPER'", memberId), List.of());
     }
 
     /** Platform-wide view of active team grants. Member grants are derived allocations and must not be counted twice. */
     public QuotaSummary platformQuotaSummary() {
         List<ModelEntitlementItem> grants = jdbc.query("""
-                SELECT meg.id, meg.team_id, meg.member_id, meg.model_name, meg.quota_mode, meg.quota_limit,
+                SELECT meg.id, meg.team_id, meg.member_id, meg.model_name, meg.quota_mode, meg.quota_limit, meg.alert_remaining_percent,
                        meg.status, meg.reason, meg.created_at, meg.revoked_at
                 FROM model_entitlement_grant meg
                 JOIN team t ON t.id = meg.team_id
-                WHERE meg.member_id IS NULL AND meg.status = 'ACTIVE' AND t.enabled = 1
+                WHERE meg.member_id IS NULL AND meg.project_id IS NULL AND meg.pool_type = 'DEVELOPMENT' AND meg.status = 'ACTIVE' AND t.enabled = 1
                 ORDER BY meg.model_name, meg.quota_mode, meg.team_id
                 """, (rs, row) -> itemFromRow(rs));
         Map<String, QuotaSummaryAccumulator> grouped = new LinkedHashMap<>();
@@ -156,13 +169,13 @@ public class ModelEntitlementRepository {
     }
 
     private List<ModelEntitlementItem> list(String where, Object... args) {
-        return jdbc.query("SELECT id, team_id, member_id, model_name, quota_mode, quota_limit, status, reason, created_at, revoked_at FROM model_entitlement_grant WHERE status = 'ACTIVE' AND " + where + " ORDER BY created_at DESC", (rs, row) -> itemFromRow(rs), args);
+        return jdbc.query("SELECT id, team_id, member_id, model_name, quota_mode, quota_limit, alert_remaining_percent, status, reason, created_at, revoked_at FROM model_entitlement_grant WHERE status = 'ACTIVE' AND " + where + " ORDER BY created_at DESC", (rs, row) -> itemFromRow(rs), args);
     }
 
     private ModelEntitlementItem itemFromRow(java.sql.ResultSet rs) throws java.sql.SQLException {
-        long id = rs.getLong("id"); QuotaMode mode = mode(rs.getString("quota_mode")); String cycle = cycleStart(mode); UsageSnapshot usage = usage(new ModelQuotaPolicy(id, rs.getString("model_name"), mode, nullableLong(rs.getObject("quota_limit"))), cycle);
+        long id = rs.getLong("id"); QuotaMode mode = mode(rs.getString("quota_mode")); String cycle = cycleStart(mode); UsageSnapshot usage = usage(new ModelQuotaPolicy(id, rs.getString("model_name"), mode, nullableLong(rs.getObject("quota_limit")), nullableInt(rs.getObject("alert_remaining_percent"))), cycle);
         Long limit = nullableLong(rs.getObject("quota_limit")); Long remaining = limit == null ? null : Math.max(0, limit - usage.consumedTokens() - usage.frozenTokens());
-        return new ModelEntitlementItem(id, rs.getLong("team_id"), nullableLong(rs.getObject("member_id")), rs.getString("model_name"), mode.name(), limit, rs.getString("status"), usage.consumedTokens(), usage.frozenTokens(), remaining, OffsetDateTime.parse(cycle), rs.getString("reason"), JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at")), JdbcTime.toOffsetDateTime(rs.getTimestamp("revoked_at")));
+        return new ModelEntitlementItem(id, rs.getLong("team_id"), nullableLong(rs.getObject("member_id")), rs.getString("model_name"), mode.name(), limit, nullableInt(rs.getObject("alert_remaining_percent")), rs.getString("status"), usage.consumedTokens(), usage.frozenTokens(), remaining, OffsetDateTime.parse(cycle), rs.getString("reason"), JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at")), JdbcTime.toOffsetDateTime(rs.getTimestamp("revoked_at")));
     }
 
     private List<UsageTrendItem> trends(String where, Object... args) {
@@ -174,23 +187,23 @@ public class ModelEntitlementRepository {
 
     private Map<String, ModelQuotaPolicy> policies(String where, Object... args) {
         Map<String, ModelQuotaPolicy> result = new LinkedHashMap<>();
-        jdbc.query("SELECT id, model_name, quota_mode, quota_limit FROM model_entitlement_grant WHERE " + where, (org.springframework.jdbc.core.RowCallbackHandler) rs -> result.put(rs.getString("model_name"), new ModelQuotaPolicy(rs.getLong("id"), rs.getString("model_name"), mode(rs.getString("quota_mode")), nullableLong(rs.getObject("quota_limit")))), args);
+        jdbc.query("SELECT id, model_name, quota_mode, quota_limit, alert_remaining_percent FROM model_entitlement_grant WHERE " + where, (org.springframework.jdbc.core.RowCallbackHandler) rs -> result.put(rs.getString("model_name"), new ModelQuotaPolicy(rs.getLong("id"), rs.getString("model_name"), mode(rs.getString("quota_mode")), nullableLong(rs.getObject("quota_limit")), nullableInt(rs.getObject("alert_remaining_percent")))), args);
         return result;
     }
     private ModelQuotaPolicy currentTeamPolicy(long teamId, String model) {
-        Map<String, ModelQuotaPolicy> result = policies("team_id = ? AND member_id IS NULL AND model_name = ? AND status = 'ACTIVE'", teamId, model); return result.get(model);
+        Map<String, ModelQuotaPolicy> result = policies("team_id = ? AND member_id IS NULL AND project_id IS NULL AND pool_type = 'DEVELOPMENT' AND model_name = ? AND status = 'ACTIVE'", teamId, model); return result.get(model);
     }
-    private long upsert(long team, Long member, String model, QuotaMode mode, Long limit, String reason) {
+    private long upsert(long team, Long member, String model, QuotaMode mode, Long limit, Integer alertRemainingPercent, String reason) {
         String where = member == null ? "team_id = ? AND member_id IS NULL AND model_name = ?" : "team_id = ? AND member_id = ? AND model_name = ?";
         Object[] args = member == null ? new Object[] {team, model} : new Object[] {team, member, model};
-        List<Long> existing = activeGrantIds(where, args);
+        List<Long> existing = activeGrantIds(where + " AND pool_type = 'DEVELOPMENT'", args);
         if (!existing.isEmpty()) {
             long id = existing.get(0);
-            jdbc.update("UPDATE model_entitlement_grant SET quota_mode = ?, quota_limit = ?, reason = ? WHERE id = ? AND status = 'ACTIVE'",
-                    mode.name(), limit, reason == null ? "" : reason.trim(), id);
+            jdbc.update("UPDATE model_entitlement_grant SET quota_mode = ?, quota_limit = ?, alert_remaining_percent = ?, reason = ? WHERE id = ? AND status = 'ACTIVE' AND pool_type = 'DEVELOPMENT'",
+                    mode.name(), limit, alertRemainingPercent, reason == null ? "" : reason.trim(), id);
             return id;
         }
-        return GeneratedKeys.insert(jdbc, "INSERT INTO model_entitlement_grant(team_id, member_id, model_name, quota_mode, quota_limit, status, reason, created_at) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)", team, member, model, mode.name(), limit, reason == null ? "" : reason.trim(), now());
+        return GeneratedKeys.insert(jdbc, "INSERT INTO model_entitlement_grant(team_id, member_id, project_id, model_name, pool_type, quota_mode, quota_limit, alert_remaining_percent, status, reason, created_at) VALUES (?, ?, NULL, ?, 'DEVELOPMENT', ?, ?, ?, 'ACTIVE', ?, ?)", team, member, model, mode.name(), limit, alertRemainingPercent, reason == null ? "" : reason.trim(), now());
     }
     private ModelEntitlementItem item(long id) { return list("id = ?", id).get(0); }
     private List<Long> activeGrantIds(String where, Object... args) { return jdbc.query("SELECT id FROM model_entitlement_grant WHERE status = 'ACTIVE' AND " + where, (rs, row) -> rs.getLong(1), args); }
@@ -204,6 +217,8 @@ public class ModelEntitlementRepository {
     private void requireEnabledModel(String model) { Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM provider_model WHERE model_name=? AND enabled=1", Integer.class, model); if (count == null || count == 0) throw bad("Model was not found or disabled: " + model); }
     private static QuotaMode mode(String raw) { try { return QuotaMode.valueOf(raw == null ? "" : raw.trim().toUpperCase()); } catch (IllegalArgumentException ex) { throw bad("quotaMode must be DAILY, WEEKLY, or UNLIMITED."); } }
     private static Long nullableLong(Object value) { return value == null ? null : ((Number) value).longValue(); }
+    private static Integer nullableInt(Object value) { return value == null ? null : ((Number) value).intValue(); }
+    private static void validateAlertThreshold(Integer value) { if (value != null && (value < 1 || value > 100)) throw bad("alertRemainingPercent must be between 1 and 100."); }
     private static Timestamp cycleTimestamp(String cycleStart) { return JdbcTime.toTimestamp(OffsetDateTime.parse(cycleStart)); }
     private static Timestamp now() { return JdbcTime.toTimestamp(OffsetDateTime.now()); }
     private static ModelGateException bad(String message) { return new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, message); }

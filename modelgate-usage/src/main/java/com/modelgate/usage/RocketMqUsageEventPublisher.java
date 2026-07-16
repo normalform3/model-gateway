@@ -16,7 +16,7 @@ import org.springframework.util.StringUtils;
 import java.nio.charset.StandardCharsets;
 
 @Component
-@ConditionalOnProperty(prefix = "modelgate.rocketmq", name = "enabled", havingValue = "true")
+@ConditionalOnProperty(prefix = "modelgate.rocketmq", name = "legacy-enabled", havingValue = "true")
 public class RocketMqUsageEventPublisher implements UsageEventPublisher, InitializingBean, DisposableBean {
     private static final Logger log = LoggerFactory.getLogger(RocketMqUsageEventPublisher.class);
 

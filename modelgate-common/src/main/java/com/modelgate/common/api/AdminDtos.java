@@ -70,6 +70,8 @@ public final class AdminDtos {
             @NotBlank String name,
             Integer keyRpm,
             Integer teamRpm,
+            Integer teamTpm,
+            Integer keyConcurrency,
             Integer teamConcurrency,
             Integer modelConcurrency,
             Long ownerUserId
@@ -83,6 +85,8 @@ public final class AdminDtos {
             String name,
             Integer keyRpm,
             Integer teamRpm,
+            Integer teamTpm,
+            Integer keyConcurrency,
             Integer teamConcurrency,
             Integer modelConcurrency,
             Boolean enabled
@@ -97,6 +101,8 @@ public final class AdminDtos {
             boolean enabled,
             int keyRpm,
             int teamRpm,
+            int teamTpm,
+            int keyConcurrency,
             int teamConcurrency,
             int modelConcurrency,
             Long ownerMemberId,
@@ -184,6 +190,25 @@ public final class AdminDtos {
             OffsetDateTime updatedAt
     ) {
     }
+
+    public record ProjectItem(long projectId, long teamId, String name, String projectCode, boolean enabled, OffsetDateTime createdAt) { }
+    public record ProjectListResponse(List<ProjectItem> items) { }
+    public record CreateProjectRequest(@NotBlank String name, @NotBlank String projectCode) { }
+    public record UpdateProjectRequest(String name, Boolean enabled) { }
+    public record ProjectQuotaRequest(@NotNull Long ownerMemberId, @NotNull Long tokenAllocation, List<String> modelNames, String reason) { }
+    public record GrantApplicationPoolRequest(List<String> modelNames, @NotNull Long tokenAllocation, String reason) { }
+    public record ProjectQuotaResponse(long projectId, long quotaAccountId, long availableTokens, List<String> modelNames) { }
+    public record ProjectServiceAccountItem(long serviceAccountId, long projectId, String name, boolean enabled, OffsetDateTime createdAt) { }
+    public record CreateProjectServiceAccountRequest(@NotBlank String name) { }
+    public record UpdateProjectServiceAccountRequest(@NotNull Boolean enabled) { }
+    public record ApplicationQuotaBalanceResponse(long scopeId, long availableTokens, long frozenTokens, long consumedTokens, OffsetDateTime updatedAt) { }
+    public record ApplicationQuotaOverview(long teamId, ApplicationQuotaBalanceResponse balance, List<ModelEntitlementItem> modelEntitlements) { }
+    public record ProjectApplicationQuotaOverview(long projectId, ApplicationQuotaBalanceResponse balance, List<ModelEntitlementItem> modelEntitlements) { }
+    public record ProjectServiceAccountStatusItem(long serviceAccountId, long projectId, String name, boolean enabled, OffsetDateTime createdAt,
+                                                  Long keyId, String keyPrefix, boolean keyEnabled, OffsetDateTime keyCreatedAt) { }
+    public record ProjectServiceAccountListResponse(List<ProjectServiceAccountStatusItem> items) { }
+    public record AttachProviderPoolCredentialRequest(@NotNull Long credentialId, @NotNull Long availableTokens) { }
+    public record UpdateProviderPoolCredentialRequest(@NotNull Long availableTokens, @NotNull Boolean enabled) { }
 
     public record BillingSummary(
             long scopeId,
@@ -390,6 +415,7 @@ public final class AdminDtos {
     public record UpsertModelEntitlementRequest(
             @NotBlank String quotaMode,
             Long quotaLimit,
+            Integer alertRemainingPercent,
             String reason,
             Long ownerMemberId
     ) { }
@@ -401,6 +427,7 @@ public final class AdminDtos {
             String modelName,
             String quotaMode,
             Long quotaLimit,
+            Integer alertRemainingPercent,
             String status,
             long consumedTokens,
             long frozenTokens,

@@ -2,6 +2,7 @@ package com.modelgate.bootstrap.api;
 
 import com.modelgate.auth.VirtualKeyService;
 import com.modelgate.auth.TeamAccessService;
+import com.modelgate.auth.ProjectCredentialService;
 import com.modelgate.auth.ProviderCredentialCipher;
 import com.modelgate.common.api.AdminDtos.*;
 import com.modelgate.common.domain.ModelQuotaPolicy;
@@ -14,6 +15,8 @@ import com.modelgate.infrastructure.db.ProviderCatalogRepository;
 import com.modelgate.infrastructure.db.TeamEntitlementRepository;
 import com.modelgate.infrastructure.db.BillingRepository;
 import com.modelgate.infrastructure.db.ModelEntitlementRepository;
+import com.modelgate.infrastructure.db.ProjectRepository;
+import com.modelgate.infrastructure.db.ProviderModelQuotaPoolRepository;
 import com.modelgate.quota.QuotaService;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
@@ -43,6 +46,9 @@ public class AdminController {
     private final BillingRepository billingRepository;
     private final ModelEntitlementRepository modelEntitlementRepository;
     private final QuotaService quotaService;
+    private final ProjectRepository projectRepository;
+    private final ProjectCredentialService projectCredentialService;
+    private final ProviderModelQuotaPoolRepository providerModelQuotaPoolRepository;
 
     public AdminController(
             AdminRepository adminRepository,
@@ -56,7 +62,10 @@ public class AdminController {
             TeamAccessService teamAccessService,
             BillingRepository billingRepository,
             ModelEntitlementRepository modelEntitlementRepository,
-            QuotaService quotaService
+            QuotaService quotaService,
+            ProjectRepository projectRepository,
+            ProjectCredentialService projectCredentialService,
+            ProviderModelQuotaPoolRepository providerModelQuotaPoolRepository
     ) {
         this.adminRepository = adminRepository;
         this.quotaAccountRepository = quotaAccountRepository;
@@ -70,6 +79,9 @@ public class AdminController {
         this.billingRepository = billingRepository;
         this.modelEntitlementRepository = modelEntitlementRepository;
         this.quotaService = quotaService;
+        this.projectRepository = projectRepository;
+        this.projectCredentialService = projectCredentialService;
+        this.providerModelQuotaPoolRepository = providerModelQuotaPoolRepository;
     }
 
     @PostMapping("/bootstrap/demo")
@@ -225,7 +237,7 @@ public class AdminController {
         return Mono.fromRunnable(() -> {
             teamEntitlementRepository.grantTeam(teamId, request); // retained legacy ledger/audit write
             for (String model : request.modelNames()) modelEntitlementRepository.upsertTeam(teamId, model,
-                    new UpsertModelEntitlementRequest("DAILY", request.tokenAllocation(), request.reason(), null));
+                    new UpsertModelEntitlementRequest("DAILY", request.tokenAllocation(), null, request.reason(), null));
             virtualKeyService.invalidateTeam(teamId);
         }).subscribeOn(Schedulers.boundedElastic()).thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
@@ -239,7 +251,7 @@ public class AdminController {
             TeamEntitlementItem reviewed = teamEntitlementRepository.review(requestId, request);
             if ("APPROVED".equals(reviewed.status()) && reviewed.grantedTokens() != null) {
                 for (String model : reviewed.grantedModelNames()) modelEntitlementRepository.upsertTeam(reviewed.teamId(), model,
-                        new UpsertModelEntitlementRequest("DAILY", reviewed.grantedTokens(), reviewed.reviewerNote(), null));
+                        new UpsertModelEntitlementRequest("DAILY", reviewed.grantedTokens(), null, reviewed.reviewerNote(), null));
             }
             virtualKeyService.invalidateTeam(reviewed.teamId());
             return reviewed;
@@ -255,7 +267,7 @@ public class AdminController {
         return Mono.fromCallable(() -> {
             MemberAccessResponse legacy = teamAccessService.grant(teamId, memberId, request);
             for (String model : request.modelNames()) modelEntitlementRepository.upsertMember(teamId, memberId, model,
-                    new UpsertModelEntitlementRequest("DAILY", request.tokenAllocation(), request.reason(), request.ownerMemberId()));
+                    new UpsertModelEntitlementRequest("DAILY", request.tokenAllocation(), null, request.reason(), request.ownerMemberId()));
             virtualKeyService.invalidateMember(memberId);
             return legacy;
         }).subscribeOn(Schedulers.boundedElastic());
@@ -339,6 +351,87 @@ public class AdminController {
         return Mono.fromCallable(() -> quotaAccountRepository.findMemberQuota(memberId)).subscribeOn(Schedulers.boundedElastic());
     }
 
+    @PostMapping("/teams/{teamId}/projects")
+    public Mono<ProjectItem> createProject(@PathVariable("teamId") long teamId, @Valid @RequestBody CreateProjectRequest request) {
+        return Mono.fromCallable(() -> projectRepository.create(teamId, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/teams/{teamId}/projects")
+    public Mono<ProjectListResponse> projects(@PathVariable("teamId") long teamId) {
+        return Mono.fromCallable(() -> projectRepository.list(teamId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PatchMapping("/teams/{teamId}/projects/{projectId}")
+    public Mono<ProjectItem> updateProject(@PathVariable("teamId") long teamId, @PathVariable("projectId") long projectId, @RequestBody UpdateProjectRequest request) {
+        return Mono.fromCallable(() -> projectRepository.update(teamId, projectId, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/teams/{teamId}/projects/{projectId}/quota-allocations")
+    public Mono<ProjectQuotaResponse> allocateProjectQuota(@PathVariable("teamId") long teamId, @PathVariable("projectId") long projectId, @Valid @RequestBody ProjectQuotaRequest request) {
+        return Mono.fromCallable(() -> projectRepository.allocate(teamId, projectId, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/teams/{teamId}/application-entitlements")
+    public Mono<org.springframework.http.ResponseEntity<Void>> grantTeamApplicationPool(@PathVariable("teamId") long teamId, @Valid @RequestBody GrantApplicationPoolRequest request) {
+        return Mono.fromRunnable(() -> projectRepository.grantTeamApplicationPool(teamId, request)).subscribeOn(Schedulers.boundedElastic())
+                .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+    }
+
+    @GetMapping("/teams/{teamId}/application-quota")
+    public Mono<ApplicationQuotaOverview> teamApplicationQuota(@PathVariable("teamId") long teamId) {
+        return Mono.fromCallable(() -> new ApplicationQuotaOverview(teamId,
+                quotaAccountRepository.findTeamApplicationQuota(teamId),
+                modelEntitlementRepository.teamApplicationEntitlements(teamId).items()))
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/teams/{teamId}/projects/{projectId}/application-quota")
+    public Mono<ProjectApplicationQuotaOverview> projectApplicationQuota(@PathVariable("teamId") long teamId, @PathVariable("projectId") long projectId) {
+        return Mono.fromCallable(() -> new ProjectApplicationQuotaOverview(projectId,
+                quotaAccountRepository.findProjectApplicationQuota(projectId),
+                modelEntitlementRepository.projectApplicationEntitlements(teamId, projectId).items()))
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/teams/{teamId}/projects/{projectId}/service-accounts")
+    public Mono<ProjectServiceAccountItem> createProjectServiceAccount(@PathVariable("teamId") long teamId, @PathVariable("projectId") long projectId, @Valid @RequestBody CreateProjectServiceAccountRequest request) {
+        return Mono.fromCallable(() -> projectRepository.createServiceAccount(teamId, projectId, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/teams/{teamId}/projects/{projectId}/service-accounts")
+    public Mono<ProjectServiceAccountListResponse> projectServiceAccounts(@PathVariable("teamId") long teamId, @PathVariable("projectId") long projectId) {
+        return Mono.fromCallable(() -> projectRepository.serviceAccounts(teamId, projectId)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PatchMapping("/teams/{teamId}/projects/{projectId}/service-accounts/{serviceAccountId}")
+    public Mono<ProjectServiceAccountItem> updateProjectServiceAccount(@PathVariable("teamId") long teamId, @PathVariable("projectId") long projectId,
+                                                                       @PathVariable("serviceAccountId") long serviceAccountId,
+                                                                       @Valid @RequestBody UpdateProjectServiceAccountRequest request) {
+        return Mono.fromCallable(() -> projectRepository.updateServiceAccount(teamId, projectId, serviceAccountId, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/project-service-accounts/{serviceAccountId}/api-keys/generate")
+    public Mono<CreateApiKeyResponse> generateApplicationKey(@PathVariable("serviceAccountId") long serviceAccountId) {
+        return Mono.fromCallable(() -> projectCredentialService.generate(serviceAccountId, false)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/project-service-accounts/{serviceAccountId}/api-keys/rotate")
+    public Mono<CreateApiKeyResponse> rotateApplicationKey(@PathVariable("serviceAccountId") long serviceAccountId) {
+        return Mono.fromCallable(() -> projectCredentialService.generate(serviceAccountId, true)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @PostMapping("/models/{modelId}/provider-quota-pool/credentials")
+    public Mono<org.springframework.http.ResponseEntity<Void>> attachProviderPoolCredential(@PathVariable("modelId") long modelId, @Valid @RequestBody AttachProviderPoolCredentialRequest request) {
+        return Mono.fromRunnable(() -> providerModelQuotaPoolRepository.attach(modelId, request.credentialId(), request.availableTokens())).subscribeOn(Schedulers.boundedElastic())
+                .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+    }
+
+    @PatchMapping("/provider-quota-pools/{poolId}/credentials/{credentialId}")
+    public Mono<org.springframework.http.ResponseEntity<Void>> updateProviderPoolCredential(@PathVariable("poolId") long poolId, @PathVariable("credentialId") long credentialId, @Valid @RequestBody UpdateProviderPoolCredentialRequest request) {
+        return Mono.fromRunnable(() -> providerModelQuotaPoolRepository.update(poolId, credentialId, request.availableTokens(), request.enabled())).subscribeOn(Schedulers.boundedElastic())
+                .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
+    }
+
     @GetMapping("/teams/{teamId}/model-entitlements")
     public Mono<ModelEntitlementListResponse> teamModelEntitlements(@PathVariable("teamId") long teamId) {
         return Mono.fromCallable(() -> modelEntitlementRepository.teamEntitlements(teamId)).subscribeOn(Schedulers.boundedElastic());
@@ -401,7 +494,7 @@ public class AdminController {
     }
 
     private static ModelQuotaPolicy policy(ModelEntitlementItem item) {
-        return new ModelQuotaPolicy(item.grantId(), item.modelName(), QuotaMode.valueOf(item.quotaMode()), item.quotaLimit());
+        return new ModelQuotaPolicy(item.grantId(), item.modelName(), QuotaMode.valueOf(item.quotaMode()), item.quotaLimit(), item.alertRemainingPercent());
     }
 
     @GetMapping("/teams/{teamId}/billing-summary")

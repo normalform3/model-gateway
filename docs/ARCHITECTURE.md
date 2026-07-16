@@ -130,13 +130,13 @@ modelgate-common
 2. 网关计算 requestId 和幂等上下文
 3. 鉴权模块读取 ApiKeyContext
 4. 权限模块校验成员权限与团队授权的交集
-5. 限流模块执行 RPM、TPM、并发校验
-6. 额度模块估算 Token，并原子冻结团队与成员的同模型周期额度
+5. 限流模块通过一次 Redis Lua 执行 Key/团队 RPM、团队 TPM、Key/团队/逻辑模型并发校验
+6. 额度模块估算 Token，并原子冻结团队与成员（或应用）的同模型周期额度
 7. 解析直接模型并从 Provider 凭据池轮询选择凭据
 8. Provider Adapter 转发请求；首包前可切换一把备用凭据
 9. 网关向客户端返回普通响应或 SSE 流
-10. 请求结束后结算两层同模型额度并发送 Usage Event
-11. 消费者异步写入用量、账单、汇总和审计
+10. 请求结束后立即在 Redis 结算两层同模型额度并写入 UsageCompletedEvent Outbox
+11. Outbox 异步投递 RocketMQ；额度账本、用量、账单、预算告警和审计消费者各自幂等处理
 ```
 
 ## 缓存策略

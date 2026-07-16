@@ -137,11 +137,11 @@ public class UserRepository {
         if (found == null) throw badRequest("Team was not found.");
         List<String> apiKeyHashes = jdbcTemplate.queryForList("SELECT key_hash FROM virtual_api_key WHERE team_id = ?", String.class, teamId);
         List<Long> quotaAccountIds = jdbcTemplate.queryForList("""
-                SELECT id FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?
+                SELECT id FROM quota_account WHERE account_type IN ('TEAM_DEVELOPMENT','TEAM_APPLICATION') AND owner_id = ?
                 UNION ALL
                 SELECT qa.id FROM quota_account qa
                 JOIN team_member m ON m.id = qa.owner_id
-                WHERE qa.account_type = 'MEMBER' AND m.team_id = ?
+                WHERE qa.account_type = 'MEMBER_DEVELOPMENT' AND m.team_id = ?
                 """, Long.class, teamId, teamId);
         deleteTeamData(teamId);
         jdbcTemplate.update("DELETE FROM team WHERE id = ?", teamId);
@@ -155,11 +155,11 @@ public class UserRepository {
         if (found == null) throw badRequest("Team was not found.");
         List<String> apiKeyHashes = jdbcTemplate.queryForList("SELECT key_hash FROM virtual_api_key WHERE team_id = ?", String.class, teamId);
         List<Long> quotaAccountIds = jdbcTemplate.queryForList("""
-                SELECT id FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?
+                SELECT id FROM quota_account WHERE account_type IN ('TEAM_DEVELOPMENT','TEAM_APPLICATION') AND owner_id = ?
                 UNION ALL
                 SELECT qa.id FROM quota_account qa
                 JOIN team_member m ON m.id = qa.owner_id
-                WHERE qa.account_type = 'MEMBER' AND m.team_id = ?
+                WHERE qa.account_type = 'MEMBER_DEVELOPMENT' AND m.team_id = ?
                 """, Long.class, teamId, teamId);
         List<Long> entitlementGrantIds = jdbcTemplate.queryForList(
                 "SELECT id FROM model_entitlement_grant WHERE team_id = ?", Long.class, teamId);
@@ -185,7 +185,7 @@ public class UserRepository {
     }
 
     private void deleteMemberData(long userId, long memberId) {
-        Long quotaAccountId = lookupLong("SELECT id FROM quota_account WHERE account_type = 'MEMBER' AND owner_id = ?", memberId);
+        Long quotaAccountId = lookupLong("SELECT id FROM quota_account WHERE account_type = 'MEMBER_DEVELOPMENT' AND owner_id = ?", memberId);
         jdbcTemplate.update("UPDATE team SET owner_user_id = NULL, status = 'DRAFT' WHERE owner_user_id = ?", userId);
         jdbcTemplate.update("DELETE FROM mq_consume_record WHERE event_id IN (SELECT event_id FROM usage_record WHERE member_id = ?)", memberId);
         jdbcTemplate.update("DELETE FROM billing_record WHERE member_id = ?", memberId);
@@ -211,10 +211,10 @@ public class UserRepository {
         jdbcTemplate.update("DELETE FROM quota_transfer WHERE team_id = ?", teamId);
         jdbcTemplate.update("DELETE FROM team_entitlement_request WHERE team_id = ?", teamId);
         jdbcTemplate.update("DELETE FROM member_model_access WHERE member_id IN (SELECT id FROM team_member WHERE team_id = ?)", teamId);
-        jdbcTemplate.update("DELETE FROM quota_transaction WHERE account_id IN (SELECT id FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?)", teamId);
-        jdbcTemplate.update("DELETE FROM quota_transaction WHERE account_id IN (SELECT qa.id FROM quota_account qa JOIN team_member m ON m.id = qa.owner_id WHERE qa.account_type = 'MEMBER' AND m.team_id = ?)", teamId);
-        jdbcTemplate.update("DELETE FROM quota_account WHERE account_type = 'MEMBER' AND owner_id IN (SELECT id FROM team_member WHERE team_id = ?)", teamId);
-        jdbcTemplate.update("DELETE FROM quota_account WHERE account_type = 'TEAM' AND owner_id = ?", teamId);
+        jdbcTemplate.update("DELETE FROM quota_transaction WHERE account_id IN (SELECT id FROM quota_account WHERE account_type IN ('TEAM_DEVELOPMENT','TEAM_APPLICATION') AND owner_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM quota_transaction WHERE account_id IN (SELECT qa.id FROM quota_account qa JOIN team_member m ON m.id = qa.owner_id WHERE qa.account_type = 'MEMBER_DEVELOPMENT' AND m.team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM quota_account WHERE account_type = 'MEMBER_DEVELOPMENT' AND owner_id IN (SELECT id FROM team_member WHERE team_id = ?)", teamId);
+        jdbcTemplate.update("DELETE FROM quota_account WHERE account_type IN ('TEAM_DEVELOPMENT','TEAM_APPLICATION') AND owner_id = ?", teamId);
         jdbcTemplate.update("DELETE FROM subject_model_access WHERE subject_id IN (SELECT id FROM access_subject WHERE team_id = ?)", teamId);
         jdbcTemplate.update("DELETE FROM subject_entitlement WHERE subject_id IN (SELECT id FROM access_subject WHERE team_id = ?)", teamId);
         jdbcTemplate.update("DELETE FROM access_subject WHERE team_id = ?", teamId);

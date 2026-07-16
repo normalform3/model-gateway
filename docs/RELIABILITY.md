@@ -26,7 +26,7 @@ Redis Key 示例：
 auth:key:{keyHash}
 ```
 
-缓存内容只保存运行时判断需要的字段：
+缓存内容只保存运行时判断需要的静态字段，并以带版本 JSON 编码；动态剩余 Token 不进入 Caffeine，而是在 Redis Lua 中原子读取。
 
 ```json
 {
@@ -58,7 +58,7 @@ rate:key:{keyId}:rpm
 rate:team:{teamId}:rpm
 rate:team:{teamId}:tpm
 concurrency:key:{keyId}
-concurrency:model:{deploymentId}
+concurrency:model:{logicalModel}
 ```
 
 多维限流必须通过 Lua 一次完成检查和扣减，避免出现某一维扣减成功、另一维失败后无法回滚。

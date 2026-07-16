@@ -13,6 +13,7 @@ import com.modelgate.common.chat.ChatCompletionRequest;
 import com.modelgate.common.chat.ChatMessage;
 import com.modelgate.common.chat.MockBehavior;
 import com.modelgate.common.domain.ApiKeyContext;
+import com.modelgate.common.domain.CredentialType;
 import com.modelgate.common.domain.BudgetPolicy;
 import com.modelgate.common.domain.EntitlementQuotaLimits;
 import com.modelgate.common.domain.QuotaMode;
@@ -20,6 +21,8 @@ import com.modelgate.infrastructure.db.ModelEntitlementRepository;
 import com.modelgate.infrastructure.db.TeamEntitlementRepository;
 import com.modelgate.common.domain.RateLimitPolicy;
 import com.modelgate.common.event.UsageReportedEvent;
+import com.modelgate.common.event.QuotaSettlementSnapshot;
+import com.modelgate.common.event.UsageCompletedEvent;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.provider.ProviderRequest;
 import com.modelgate.provider.mock.MockProvider;
@@ -235,9 +238,12 @@ class MvpUnitTests {
                 Set.of("smart-chat"),
                 Map.of(),
                 Map.of(),
-                new RateLimitPolicy(60, 600, 20, 50),
+                new RateLimitPolicy(60, 600, 120000, 5, 20, 50),
                 new BudgetPolicy(500_000L),
                 true,
+                null,
+                CredentialType.DEVELOPER,
+                null,
                 null);
 
         assertThat(context.memberId()).isEqualTo(4L);
@@ -246,7 +252,7 @@ class MvpUnitTests {
 
     @Test
     void teamCreationContractAllowsAnOwnerlessDraft() {
-        CreateTeamRequest request = new CreateTeamRequest(1L, "Draft Team", null, null, null, null, null);
+        CreateTeamRequest request = new CreateTeamRequest(1L, "Draft Team", null, null, null, null, null, null, null);
 
         assertThat(request.ownerUserId()).isNull();
         assertThat(request.name()).isEqualTo("Draft Team");
@@ -277,6 +283,51 @@ class MvpUnitTests {
             String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
             assertThat(sql).contains("UPDATE virtual_api_key SET enabled = 0", "DROP TABLE application", "DROP COLUMN application_id", "granted_models");
         }
+    }
+
+    @Test
+    void dualQuotaMigrationSeparatesDeveloperAndApplicationSubjects() throws Exception {
+        try (InputStream input = getClass().getResourceAsStream("/db/migration/V10__dual_development_and_application_quota_pools.sql")) {
+            assertThat(input).isNotNull();
+            String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(sql).contains("TEAM_DEVELOPMENT", "MEMBER_DEVELOPMENT", "TEAM_APPLICATION", "PROJECT_APPLICATION");
+            assertThat(sql).contains("credential_type", "project_service_account", "provider_model_quota_pool");
+        }
+    }
+
+    @Test
+    void usageCompletedPipelineMigrationDefinesRuntimeControlsAndDurableConsumers() throws Exception {
+        try (InputStream input = getClass().getResourceAsStream("/db/migration/V11__usage_completed_event_pipeline.sql")) {
+            assertThat(input).isNotNull();
+            String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(sql).contains("team_tpm", "key_concurrency", "alert_remaining_percent", "usage_event_outbox", "budget_alert", "audit_log");
+        }
+    }
+
+    @Test
+    void usageCompletedEventCarriesOnlyTerminalMetadataAndQuotaSnapshots() {
+        UsageCompletedEvent event = new UsageCompletedEvent("usage-req-1", "req-1", 1L, 2L, 3L, 4L,
+                CredentialType.DEVELOPER, null, null, "smart-chat", "mock", "mock-chat", 10, 20, 30, 45,
+                "SUCCESS", OffsetDateTime.now(), List.of(new QuotaSettlementSnapshot(7L, "smart-chat", "DAILY", 100L,
+                20, OffsetDateTime.now(), 40, 30, 70L, false)));
+
+        assertThat(event.eventId()).isEqualTo("usage-req-1");
+        assertThat(event.quotaSettlements()).singleElement().satisfies(snapshot -> {
+            assertThat(snapshot.remainingTokens()).isEqualTo(70L);
+            assertThat(snapshot.alertRemainingPercent()).isEqualTo(20);
+        });
+    }
+
+    @Test
+    void applicationCredentialCarriesAnIndependentProjectSubject() {
+        ApiKeyContext context = new ApiKeyContext(8L, 1L, 2L, null, 14L, Set.of("gpt-model"), Map.of(), Map.of(),
+                new RateLimitPolicy(10, 20, 1000, 2, 3, 5), new BudgetPolicy(100L), true, null,
+                CredentialType.APPLICATION, 22L, 31L);
+
+        assertThat(context.credentialType()).isEqualTo(CredentialType.APPLICATION);
+        assertThat(context.memberId()).isNull();
+        assertThat(context.projectId()).isEqualTo(22L);
+        assertThat(context.serviceAccountId()).isEqualTo(31L);
     }
 
     @Test
@@ -331,7 +382,7 @@ class MvpUnitTests {
     void existingEntitlementIsUpdatedInPlaceAndRevocationDeletesIt() {
         RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate(List.of(42L));
         ModelEntitlementRepository repository = new ModelEntitlementRepository(jdbcTemplate);
-        UpsertModelEntitlementRequest request = new UpsertModelEntitlementRequest("DAILY", 100L, "adjusted", null);
+        UpsertModelEntitlementRequest request = new UpsertModelEntitlementRequest("DAILY", 100L, null, "adjusted", null);
 
         ModelEntitlementItem item = repository.upsertTeam(1L, "mock-gpt-4o-mini", request);
         List<Long> deleted = repository.revokeTeam(1L, "mock-gpt-4o-mini");
@@ -433,7 +484,7 @@ class MvpUnitTests {
                 20,
                 100L,
                 "SUCCESS",
-                OffsetDateTime.now());
+                OffsetDateTime.now(), CredentialType.DEVELOPER, null, null);
 
         assertThat(event.memberId()).isEqualTo(4L);
         assertThat(event.totalTokens()).isEqualTo(20);
@@ -595,7 +646,7 @@ class MvpUnitTests {
                 return (List<T>) activeEntitlementGrantIds;
             }
             if (sql.startsWith("SELECT id, team_id, member_id, model_name")) {
-                return List.of((T) new ModelEntitlementItem(42L, 1L, null, "mock-gpt-4o-mini", "DAILY", 100L,
+                return List.of((T) new ModelEntitlementItem(42L, 1L, null, "mock-gpt-4o-mini", "DAILY", 100L, null,
                         "ACTIVE", 0L, 0L, 100L, OffsetDateTime.now(), "adjusted", OffsetDateTime.now(), null));
             }
             return List.of();

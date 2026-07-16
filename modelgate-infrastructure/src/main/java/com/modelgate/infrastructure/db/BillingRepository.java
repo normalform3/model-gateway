@@ -1,6 +1,6 @@
 package com.modelgate.infrastructure.db;
 
-import com.modelgate.common.event.UsageReportedEvent;
+import com.modelgate.common.event.UsageCompletedEvent;
 import com.modelgate.common.api.AdminDtos.BillingSummary;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -27,12 +27,12 @@ public class BillingRepository {
         }
     }
 
-    public void insertUsage(UsageReportedEvent event) {
+    public void insertUsage(UsageCompletedEvent event) {
         jdbcTemplate.update("""
                         INSERT IGNORE INTO usage_record(
                             event_id, request_id, organization_id, team_id, api_key_id,
-                            member_id, provider, model, input_tokens, output_tokens, total_tokens, usage_source, status, occurred_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            member_id, credential_type, project_id, service_account_id, provider, model, input_tokens, output_tokens, total_tokens, usage_source, status, occurred_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 event.eventId(),
                 event.requestId(),
@@ -40,8 +40,11 @@ public class BillingRepository {
                 event.teamId(),
                 event.apiKeyId(),
                 event.memberId(),
+                event.credentialType().name(),
+                event.projectId(),
+                event.serviceAccountId(),
                 event.provider(),
-                event.model(),
+                event.actualModel(),
                 event.inputTokens(),
                 event.outputTokens(),
                 event.totalTokens(),
@@ -50,25 +53,28 @@ public class BillingRepository {
                 JdbcTime.toTimestamp(event.occurredAt()));
     }
 
-    public void insertBilling(UsageReportedEvent event) {
-        Pricing pricing = findPricing(event.provider(), event.model());
+    public void insertBilling(UsageCompletedEvent event) {
+        Pricing pricing = findPricing(event.provider(), event.actualModel());
         BigDecimal amount = pricing.inputPricePerMillion()
                 .multiply(BigDecimal.valueOf(event.inputTokens())).movePointLeft(6)
                 .add(pricing.outputPricePerMillion().multiply(BigDecimal.valueOf(event.outputTokens())).movePointLeft(6));
         jdbcTemplate.update("""
                         INSERT IGNORE INTO billing_record(
                             request_id, organization_id, team_id, api_key_id,
-                            member_id, provider, model, input_tokens, output_tokens, unit_price, amount, currency, billing_type, created_at
+                            member_id, credential_type, project_id, service_account_id, provider, model, input_tokens, output_tokens, unit_price, amount, currency, billing_type, created_at
                             , input_unit_price, output_unit_price
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 event.requestId(),
                 event.organizationId(),
                 event.teamId(),
                 event.apiKeyId(),
                 event.memberId(),
+                event.credentialType().name(),
+                event.projectId(),
+                event.serviceAccountId(),
                 event.provider(),
-                event.model(),
+                event.actualModel(),
                 event.inputTokens(),
                 event.outputTokens(),
                 pricing.inputPricePerMillion().add(pricing.outputPricePerMillion()),
@@ -80,11 +86,10 @@ public class BillingRepository {
                 pricing.outputPricePerMillion());
     }
 
-    public void insertQuotaConsumeTransaction(UsageReportedEvent event) {
-        Long accountId = jdbcTemplate.queryForObject(
-                "SELECT id FROM quota_account WHERE account_type = 'MEMBER' AND owner_id = ?",
-                Long.class,
-                event.memberId());
+    public void insertQuotaConsumeTransaction(UsageCompletedEvent event) {
+        String accountType = "APPLICATION".equals(event.credentialType().name()) ? "PROJECT_APPLICATION" : "MEMBER_DEVELOPMENT";
+        Long ownerId = "APPLICATION".equals(event.credentialType().name()) ? event.projectId() : event.memberId();
+        Long accountId = jdbcTemplate.queryForObject("SELECT id FROM quota_account WHERE account_type = ? AND owner_id = ?", Long.class, accountType, ownerId);
         Long balanceAfter = jdbcTemplate.queryForObject(
                 "SELECT available_tokens FROM quota_account WHERE id = ?",
                 Long.class,
@@ -97,7 +102,7 @@ public class BillingRepository {
                 "qt-" + event.eventId() + "-consume",
                 accountId,
                 event.requestId(),
-                "CONSUME",
+                event.credentialType().name() + "_CONSUME",
                 event.totalTokens(),
                 balanceAfter == null ? 0L : balanceAfter,
                 event.eventId(),

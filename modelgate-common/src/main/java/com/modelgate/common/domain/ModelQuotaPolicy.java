@@ -1,7 +1,13 @@
 package com.modelgate.common.domain;
 
 /** The current quota policy for one concrete model at one entitlement level. */
-public record ModelQuotaPolicy(long grantId, String modelName, QuotaMode mode, Long limit) {
+public record ModelQuotaPolicy(
+        long grantId,
+        String modelName,
+        QuotaMode mode,
+        Long limit,
+        Integer alertRemainingPercent
+) {
     public boolean limited() {
         return mode != QuotaMode.UNLIMITED;
     }

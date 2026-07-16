@@ -1,7 +1,7 @@
 package com.modelgate.billing;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.modelgate.common.event.UsageReportedEvent;
+import com.modelgate.common.event.UsageCompletedEvent;
 import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
 import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
 import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 @Component
-@ConditionalOnProperty(prefix = "modelgate.rocketmq", name = "enabled", havingValue = "true")
+@ConditionalOnProperty(prefix = "modelgate.rocketmq", name = "legacy-enabled", havingValue = "true")
 public class RocketMqUsageConsumer implements InitializingBean, DisposableBean {
     private static final Logger log = LoggerFactory.getLogger(RocketMqUsageConsumer.class);
 
@@ -48,7 +48,7 @@ public class RocketMqUsageConsumer implements InitializingBean, DisposableBean {
         consumer.registerMessageListener((MessageListenerConcurrently) (messages, context) -> {
             try {
                 for (var message : messages) {
-                    UsageReportedEvent event = objectMapper.readValue(message.getBody(), UsageReportedEvent.class);
+                    UsageCompletedEvent event = objectMapper.readValue(message.getBody(), UsageCompletedEvent.class);
                     billingService.consume(event);
                 }
                 return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
