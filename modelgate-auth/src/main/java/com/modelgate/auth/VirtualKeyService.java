@@ -8,8 +8,12 @@ import com.modelgate.common.domain.ApiKeyContext;
 import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.infrastructure.db.AdminRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -17,25 +21,35 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Base64;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 @Service
-public class VirtualKeyService {
+public class VirtualKeyService implements AuthCacheInvalidationHandler {
+    private static final Logger log = LoggerFactory.getLogger(VirtualKeyService.class);
     private static final Duration REDIS_TTL = Duration.ofMinutes(5);
 
     private final AdminRepository adminRepository;
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final AuthCacheInvalidationPublisher invalidationPublisher;
     private final Cache<String, ApiKeyContext> localCache = Caffeine.newBuilder()
             .maximumSize(20_000)
             .expireAfterWrite(Duration.ofMinutes(2))
             .build();
 
-    public VirtualKeyService(AdminRepository adminRepository, StringRedisTemplate redisTemplate, ObjectMapper objectMapper) {
+    public VirtualKeyService(
+            AdminRepository adminRepository,
+            StringRedisTemplate redisTemplate,
+            ObjectMapper objectMapper,
+            AuthCacheInvalidationPublisher invalidationPublisher
+    ) {
         this.adminRepository = adminRepository;
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
+        this.invalidationPublisher = invalidationPublisher;
     }
 
     /** A member owns at most one active key; its model set is resolved dynamically. */
@@ -52,15 +66,17 @@ public class VirtualKeyService {
     }
 
     public void invalidateMember(long memberId) {
-        invalidateHashes(adminRepository.findKeyHashesByMember(memberId));
+        scheduleInvalidation(AuthCacheInvalidationEvent.member(memberId));
     }
 
     public void invalidateKeyHashes(Iterable<String> hashes) {
-        invalidateHashes(hashes);
+        List<String> copiedHashes = copyHashes(hashes);
+        if (copiedHashes.isEmpty()) return;
+        scheduleInvalidation(AuthCacheInvalidationEvent.keyHashes(copiedHashes));
     }
 
     public void invalidateTeam(long teamId) {
-        invalidateHashes(adminRepository.findKeyHashesByTeam(teamId));
+        scheduleInvalidation(AuthCacheInvalidationEvent.team(teamId));
     }
 
     public void invalidateQuotaAccount(long accountId) {
@@ -72,8 +88,7 @@ public class VirtualKeyService {
             throw new ModelGateException(ErrorCode.INVALID_API_KEY, "API key was not found.");
         }
         adminRepository.findKeyHash(keyId).ifPresent(hash -> {
-            localCache.invalidate(hash);
-            redisTemplate.delete(redisKey(hash));
+            invalidateKeyHashes(List.of(hash));
         });
     }
 
@@ -165,11 +180,66 @@ public class VirtualKeyService {
         return "auth:key:" + hash;
     }
 
-    private void invalidateHashes(Iterable<String> hashes) {
+    @Override
+    public void evictLocalKeyHashes(Iterable<String> hashes) {
         for (String hash : hashes) {
             localCache.invalidate(hash);
-            try { redisTemplate.delete(redisKey(hash)); } catch (RuntimeException ignored) { }
         }
+    }
+
+    @Override
+    public void evictLocalMember(long memberId) {
+        evictLocalKeyHashes(adminRepository.findKeyHashesByMember(memberId));
+    }
+
+    @Override
+    public void evictLocalTeam(long teamId) {
+        evictLocalKeyHashes(adminRepository.findKeyHashesByTeam(teamId));
+    }
+
+    private void scheduleInvalidation(AuthCacheInvalidationEvent event) {
+        Runnable action = () -> invalidateOrigin(event);
+        if (TransactionSynchronizationManager.isSynchronizationActive()
+                && TransactionSynchronizationManager.isActualTransactionActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    action.run();
+                }
+            });
+            return;
+        }
+        action.run();
+    }
+
+    private void invalidateOrigin(AuthCacheInvalidationEvent event) {
+        List<String> hashes = hashesFor(event);
+        evictLocalKeyHashes(hashes);
+        for (String hash : hashes) {
+            try {
+                redisTemplate.delete(redisKey(hash));
+            } catch (RuntimeException ex) {
+                log.warn("Auth cache Redis eviction failed. targetType={}, keyCount={}", event.targetType(), hashes.size(), ex);
+                break;
+            }
+        }
+        invalidationPublisher.publish(event);
+    }
+
+    private List<String> hashesFor(AuthCacheInvalidationEvent event) {
+        return switch (event.targetType()) {
+            case KEY_HASHES -> event.keyHashes();
+            case MEMBER -> adminRepository.findKeyHashesByMember(event.targetId());
+            case TEAM -> adminRepository.findKeyHashesByTeam(event.targetId());
+        };
+    }
+
+    private List<String> copyHashes(Iterable<String> hashes) {
+        List<String> copy = new ArrayList<>();
+        for (String hash : hashes) {
+            if (hash != null && !hash.isBlank()) copy.add(hash);
+        }
+        return copy;
     }
 
     private record CachedContext(int version, ApiKeyContext context) {

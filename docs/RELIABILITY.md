@@ -40,6 +40,12 @@ auth:key:{keyHash}
 
 `allowedModels` 是团队有效授权与成员授权的缓存交集；它不是管理员手工写入 Key 的独立策略。
 
+### 多节点失效
+
+禁用 Key、成员或团队权限变更在数据库事务提交后，由发起节点删除 Redis 的 `auth:key:{keyHash}`，并向 `modelgate:auth-cache:invalidate:v1` 发布版本化 Redis Pub/Sub 事件。其他网关节点只清理本地 Caffeine；事件只包含 Key 哈希或成员/团队内部 ID，不包含明文 Key 或权限内容。
+
+Redis Pub/Sub 在连接正常时提供秒级失效，不等待每个节点确认；发布或订阅异常时记录不含敏感信息的日志，Caffeine 两分钟 TTL 仍是兜底。额度、限流和并发状态不使用该事件，继续由 Redis Lua 原子维护。
+
 ## 多维限流
 
 需要检查：

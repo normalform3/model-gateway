@@ -11,6 +11,10 @@ spring:
       database: ${MODELGATE_REDIS_DATABASE:0}
 
 modelgate:
+  auth-cache:
+    # All gateway instances that share Redis must use the same channel. Set an instance ID in multi-node deployments for traceability.
+    invalidation-channel: ${MODELGATE_AUTH_CACHE_INVALIDATION_CHANNEL:modelgate:auth-cache:invalidate:v1}
+    instance-id: ${MODELGATE_AUTH_CACHE_INSTANCE_ID:}
   provider:
     master-key: ${MODELGATE_PROVIDER_MASTER_KEY}
   mock:
