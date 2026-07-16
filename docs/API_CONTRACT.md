@@ -238,6 +238,48 @@ POST /admin/teams/{teamId}/dissolve
 
 开发者可调用 `POST /admin/members/{memberId}/api-keys/generate` 生成个人 Key，或调用 `POST /admin/members/{memberId}/api-keys/rotate` 轮换；旧 Key 会立即失效，新明文仍只返回一次。
 
+### 项目额度池、项目与应用 Key
+
+开发额度池和项目额度池彼此独立。平台管理员可通过下列接口向团队项目额度池授予模型和 Token，并查看团队池和项目级的可用、冻结、已消费 Token；控制台不会向平台管理员暴露服务账号或应用 Key：
+
+```http
+POST /admin/teams/{teamId}/application-entitlements
+GET  /admin/teams/{teamId}/application-quota
+PUT  /admin/teams/{teamId}/application-entitlements/{modelName}
+DELETE /admin/teams/{teamId}/application-entitlements/{modelName}
+```
+
+```json
+{
+  "modelNames": ["gpt-4o"],
+  "tokenAllocation": 500000,
+  "reason": "Production application budget"
+}
+```
+
+团队负责人可在该池内创建项目、划拨项目额度、管理服务账号和应用 Key：
+
+```http
+GET/POST /admin/teams/{teamId}/projects
+PATCH    /admin/teams/{teamId}/projects/{projectId}
+GET      /admin/teams/{teamId}/projects/{projectId}/application-quota
+POST     /admin/teams/{teamId}/projects/{projectId}/quota-allocations
+GET/POST /admin/teams/{teamId}/projects/{projectId}/service-accounts
+PATCH    /admin/teams/{teamId}/projects/{projectId}/service-accounts/{serviceAccountId}
+POST     /admin/project-service-accounts/{serviceAccountId}/api-keys/generate
+POST     /admin/project-service-accounts/{serviceAccountId}/api-keys/rotate
+```
+
+项目额度划拨必须传入当前团队负责人的 `ownerMemberId`，且 `modelNames` 必须来自团队项目额度池已获授权的模型。停用项目或服务账号会阻止应用调用；停用服务账号会同步停用其全部 `APPLICATION` 虚拟 Key。应用 Key 明文仅在生成或轮换时返回一次。
+
+平台管理员使用模型级 `PUT` 创建或调整团队项目额度池中的单个模型：
+
+```json
+{"tokenAllocation": 800000, "reason": "Increase production capacity"}
+```
+
+上调会补充团队项目池可用 Token；下调会回收未划拨 Token。若模型额度已划拨给项目，或池内可用余额不足以回收，接口返回额度不足错误而不会部分修改。`DELETE` 仅在该模型没有活动项目分配且其额度可完整回收时执行。
+
 ### 禁用虚拟 Key
 
 ```http

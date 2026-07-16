@@ -197,6 +197,7 @@ public final class AdminDtos {
     public record UpdateProjectRequest(String name, Boolean enabled) { }
     public record ProjectQuotaRequest(@NotNull Long ownerMemberId, @NotNull Long tokenAllocation, List<String> modelNames, String reason) { }
     public record GrantApplicationPoolRequest(List<String> modelNames, @NotNull Long tokenAllocation, String reason) { }
+    public record UpsertApplicationPoolModelRequest(@NotNull Long tokenAllocation, String reason) { }
     public record ProjectQuotaResponse(long projectId, long quotaAccountId, long availableTokens, List<String> modelNames) { }
     public record ProjectServiceAccountItem(long serviceAccountId, long projectId, String name, boolean enabled, OffsetDateTime createdAt) { }
     public record CreateProjectServiceAccountRequest(@NotBlank String name) { }

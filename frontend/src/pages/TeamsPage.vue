@@ -58,7 +58,7 @@ const ownerCandidates = computed(() => selected.value ? users.value.filter(user 
 const directoryOwnerOptions = computed(() => users.value.filter(user => user.enabled && user.role === "OWNER" && user.teamId !== null));
 const teamForm = reactive({ organizationId: 1, name: "", ownerUserId: null as number | null, keyRpm: 60, teamRpm: 600, teamConcurrency: 20, modelConcurrency: 50 });
 const entitlementForm = reactive({ modelName: "", quotaMode: "DAILY", quotaLimit: 1_000_000_000 as number | null, reason: "" });
-const applicationPoolForm = reactive({ tokenAllocation: 1_000_000_000 as number | null, modelNames: [] as string[], reason: "" });
+const applicationPoolForm = reactive({ tokenAllocation: 1_000_000_000 as number | null, modelName: "", reason: "" });
 const projectForm = reactive({ name: "", projectCode: "" });
 const projectAllocationForm = reactive({ tokenAllocation: 1_000_000_000 as number | null, modelNames: [] as string[], reason: "" });
 const serviceAccountForm = reactive({ name: "" });
@@ -67,6 +67,7 @@ const entitlementScope = computed<QuotaScope>(() => dialog.value === "member-ent
 const quotaItems = computed(() => entitlements.value.filter(item => item.status === "ACTIVE" && item.quotaLimit !== null).map(item => ({ modelName: item.modelName, quotaMode: item.quotaMode, allocatedTokens: item.quotaLimit ?? 0, consumedTokens: item.consumedTokens, frozenTokens: item.frozenTokens, remainingTokens: item.remainingTokens ?? 0 })));
 const unlimitedCount = computed(() => entitlements.value.filter(item => item.status === "ACTIVE" && item.quotaLimit === null).length);
 const canManageProjectPool = computed(() => !props.adminMode && canManageMembers.value);
+const canViewProjectPool = computed(() => props.adminMode || canManageProjectPool.value);
 const applicationModels = computed(() => applicationQuota.value?.modelEntitlements.filter(item => item.status === "ACTIVE").map(item => item.modelName) ?? []);
 const projectQuotaItems = computed(() => projectQuota.value?.modelEntitlements.filter(item => item.quotaLimit !== null).map(item => ({ modelName: item.modelName, quotaMode: item.quotaMode, allocatedTokens: item.quotaLimit ?? 0, consumedTokens: item.consumedTokens, frozenTokens: item.frozenTokens, remainingTokens: item.remainingTokens ?? 0 })) ?? []);
 
@@ -189,7 +190,7 @@ async function select(team: TeamSummary) {
 }
 
 async function loadApplicationWorkspace(team = selected.value) {
-  if (!team || props.adminMode || !canManageProjectPool.value) return;
+  if (!team || !canViewProjectPool.value) return;
   applicationLoading.value = true;
   try {
     const [quotaData, projectData] = await Promise.all([api.teamApplicationQuota(team.teamId), api.projects(team.teamId)]);
@@ -209,13 +210,13 @@ async function loadApplicationWorkspace(team = selected.value) {
 }
 
 async function selectProject(project: ProjectItem) {
-  if (!selected.value || !canManageProjectPool.value) return;
+  if (!selected.value || !canViewProjectPool.value) return;
   selectedProject.value = project;
   projectLoading.value = true;
   try {
     const [quotaData, serviceData] = await Promise.all([
       api.projectApplicationQuota(selected.value.teamId, project.projectId),
-      api.projectServiceAccounts(selected.value.teamId, project.projectId)
+      canManageProjectPool.value ? api.projectServiceAccounts(selected.value.teamId, project.projectId) : Promise.resolve({ items: [] })
     ]);
     if (selectedProject.value?.projectId !== project.projectId) return;
     projectQuota.value = quotaData;
@@ -227,21 +228,32 @@ async function selectProject(project: ProjectItem) {
   }
 }
 
-function openApplicationPool() {
-  Object.assign(applicationPoolForm, { tokenAllocation: 1_000_000_000, modelNames: [], reason: "" });
+function openApplicationPool(current?: ModelEntitlement) {
+  Object.assign(applicationPoolForm, { tokenAllocation: current?.quotaLimit ?? 1_000_000_000, modelName: current?.modelName ?? allModels.value[0] ?? "", reason: current?.reason ?? "" });
+  quotaInputValid.value = true;
   dialog.value = "application-pool";
 }
 
 async function saveApplicationPool() {
-  if (!selected.value || !applicationPoolForm.tokenAllocation || applicationPoolForm.tokenAllocation <= 0 || !applicationPoolForm.modelNames.length) {
+  if (!selected.value || !applicationPoolForm.tokenAllocation || applicationPoolForm.tokenAllocation < 0 || !applicationPoolForm.modelName) {
     ElMessage.warning("请选择模型并填写有效的额度"); return;
   }
   try {
-    await api.grantTeamApplicationPool(selected.value.teamId, applicationPoolForm);
+    await api.upsertTeamApplicationModel(selected.value.teamId, applicationPoolForm.modelName, applicationPoolForm);
     dialog.value = null;
     ElMessage.success("团队项目额度池已更新");
-    if (!props.adminMode) await loadApplicationWorkspace();
+    await loadApplicationWorkspace();
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : "项目额度池配置失败"); }
+}
+
+async function deleteApplicationPoolModel(item: ModelEntitlement) {
+  if (!selected.value) return;
+  try {
+    await ElMessageBox.confirm(`删除 ${item.modelName} 会收回未划拨 Token，并禁止该模型继续分配给项目。`, "确认删除项目额度模型", { type: "warning", confirmButtonText: "删除并收回" });
+    await api.deleteTeamApplicationModel(selected.value.teamId, item.modelName);
+    await loadApplicationWorkspace();
+    ElMessage.success("项目额度模型已删除");
+  } catch (error) { if (error !== "cancel" && error !== "close") ElMessage.error(error instanceof Error ? error.message : "删除项目额度模型失败"); }
 }
 
 function openProjectDialog() {
@@ -610,24 +622,21 @@ onMounted(() => { void loadCatalog(); });
           </section>
         </el-tab-pane>
         <el-tab-pane label="开发额度池" name="entitlements"><section class="surface"><div class="section-title"><div><h2>开发额度池与模型权益</h2><p class="muted">开发额度池用于开发成员及其凭证；成员分配不会重复计入团队使用。</p></div><el-button v-if="adminMode && selectedIsOperational" text type="primary" @click="openEntitlement()">发放模型权益</el-button></div><el-table :data="entitlements" size="small"><el-table-column prop="modelName" label="模型" min-width="180" /><el-table-column prop="quotaMode" label="周期" width="90"><template #default="scope">{{ scope.row.quotaMode === "WEEKLY" ? "每周" : scope.row.quotaMode === "DAILY" ? "每日" : "不限" }}</template></el-table-column><el-table-column label="额度上限" min-width="120"><template #default="scope">{{ formatTokenCount(scope.row.quotaLimit) }}</template></el-table-column><el-table-column label="当前周期" min-width="260"><template #default="scope">{{ formatTokenCount(scope.row.consumedTokens) }} 已用 · {{ formatTokenCount(scope.row.frozenTokens) }} 冻结 · {{ formatTokenCount(scope.row.remainingTokens) }} 剩余</template></el-table-column><el-table-column prop="status" label="状态" width="100" /><el-table-column v-if="adminMode && selectedIsOperational" label="操作" width="140"><template #default="scope"><el-button text @click="openEntitlement(undefined, scope.row)">调整</el-button><el-button v-if="scope.row.status === 'ACTIVE'" text type="danger" @click="revokeTeam(scope.row)">收回</el-button></template></el-table-column></el-table></section></el-tab-pane>
-        <el-tab-pane v-if="adminMode || canManageProjectPool" :label="adminMode ? '项目额度池配置' : '项目额度池'" name="project-pool" @click="loadApplicationWorkspace()">
-          <section v-if="adminMode" class="surface application-pool-admin">
-            <div class="section-title"><div><p class="eyebrow">Application pool provisioning</p><h2>团队项目额度池配置</h2><p class="muted">平台管理员只负责向团队授予应用模型与初始额度；项目、服务账号和应用 Key 仅由团队负责人管理。</p></div><el-button type="primary" :disabled="!selectedIsOperational" @click="openApplicationPool">配置项目额度池</el-button></div>
-            <el-alert type="info" :closable="false" title="项目额度与开发额度隔离" description="此处配置的 Token 仅进入团队项目额度池，不会增加开发成员额度，也不会展示团队内项目和应用凭证。" />
-          </section>
-          <section v-else class="project-pool-workspace" v-loading="applicationLoading">
+        <el-tab-pane v-if="canViewProjectPool" label="项目额度池" name="project-pool" @click="loadApplicationWorkspace()">
+          <section class="project-pool-workspace" v-loading="applicationLoading">
             <section class="surface project-pool-summary">
-              <div class="section-title"><div><p class="eyebrow">Application quota pool</p><h2>团队项目额度池</h2><p class="muted">项目与服务账号只能消费此额度池中已划拨的额度，不会占用开发额度池。</p></div><el-button type="primary" :disabled="!selectedIsOperational || !hasActiveOwner" @click="openProjectDialog">新建项目</el-button></div>
+              <div class="section-title"><div><p class="eyebrow">Application quota pool</p><h2>团队项目额度池</h2><p class="muted">项目与服务账号只能消费此额度池中已划拨的额度，不会占用开发额度池。</p></div><div class="team-context-actions"><el-button v-if="adminMode" type="primary" :disabled="!selectedIsOperational" @click="openApplicationPool">配置项目额度池</el-button><el-button v-else type="primary" :disabled="!selectedIsOperational || !hasActiveOwner" @click="openProjectDialog">新建项目</el-button></div></div>
               <div class="detail-metrics"><span>可用 Token<strong>{{ formatTokenCount(applicationQuota?.balance.availableTokens ?? 0) }}</strong></span><span>冻结 Token<strong>{{ formatTokenCount(applicationQuota?.balance.frozenTokens ?? 0) }}</strong></span><span>已消费 Token<strong>{{ formatTokenCount(applicationQuota?.balance.consumedTokens ?? 0) }}</strong></span><span>可用模型<strong>{{ applicationModels.length }}</strong></span></div>
-              <div class="application-model-tags"><el-tag v-for="model in applicationModels" :key="model" effect="plain">{{ model }}</el-tag><span v-if="!applicationModels.length" class="muted">平台管理员尚未向此团队授予项目模型与额度。</span></div>
+              <div class="application-model-tags"><el-tag v-for="model in applicationModels" :key="model" effect="plain">{{ model }}</el-tag><span v-if="!applicationModels.length" class="muted">平台管理员尚未向此团队授予项目模型与额度。</span></div><p v-if="adminMode" class="overview-note">平台管理员可查看团队池与项目用量快照，并可调整每个模型的项目额度上限；项目分配、服务账号和应用 Key 仍仅由团队负责人管理。</p>
+              <el-table v-if="adminMode" class="application-model-table" :data="applicationQuota?.modelEntitlements ?? []" size="small"><el-table-column prop="modelName" label="项目模型" min-width="180" /><el-table-column label="模型额度上限" min-width="150"><template #default="scope">{{ formatTokenCount(scope.row.quotaLimit) }}</template></el-table-column><el-table-column label="当前使用" min-width="240"><template #default="scope">{{ formatTokenCount(scope.row.consumedTokens) }} 已用 · {{ formatTokenCount(scope.row.frozenTokens) }} 冻结 · {{ formatTokenCount(scope.row.remainingTokens) }} 剩余</template></el-table-column><el-table-column label="操作" width="160" fixed="right"><template #default="scope"><el-button text type="primary" @click="openApplicationPool(scope.row)">调整</el-button><el-button text type="danger" @click="deleteApplicationPoolModel(scope.row)">删除</el-button></template></el-table-column></el-table>
             </section>
             <section class="team-master project-master">
               <aside class="surface team-list project-list"><div class="section-title"><div><h3>项目目录</h3><p class="muted">{{ projects.length }} 个项目</p></div></div><div v-if="projects.length" class="compact-list"><button v-for="project in projects" :key="project.projectId" type="button" class="list-row" :class="{ selected: selectedProject?.projectId === project.projectId }" @click="selectProject(project)"><strong>{{ project.name }}</strong><small>{{ project.projectCode }} · {{ project.enabled ? '运行中' : '已停用' }}</small></button></div><p v-else class="muted">尚未创建项目。项目用于隔离业务服务的额度和应用凭证。</p></aside>
               <section class="surface team-detail project-detail" v-loading="projectLoading">
-                <template v-if="selectedProject"><div class="section-title"><div><p class="eyebrow">Project application quota</p><h2>{{ selectedProject.name }}</h2><p class="muted">{{ selectedProject.projectCode }} · {{ selectedProject.enabled ? '运行中' : '已停用' }}</p></div><div class="team-context-actions"><el-button :disabled="!selectedProject.enabled || !applicationModels.length" type="primary" plain @click="openProjectAllocation">划拨项目额度</el-button><el-button v-if="selectedProject.enabled" type="danger" plain @click="disableProject(selectedProject)">停用项目</el-button></div></div>
-                  <div class="detail-metrics"><span>可用 Token<strong>{{ formatTokenCount(projectQuota?.balance.availableTokens ?? 0) }}</strong></span><span>冻结 Token<strong>{{ formatTokenCount(projectQuota?.balance.frozenTokens ?? 0) }}</strong></span><span>已消费 Token<strong>{{ formatTokenCount(projectQuota?.balance.consumedTokens ?? 0) }}</strong></span><span>服务账号<strong>{{ serviceAccounts.length }}</strong></span></div>
+                <template v-if="selectedProject"><div class="section-title"><div><p class="eyebrow">Project application quota</p><h2>{{ selectedProject.name }}</h2><p class="muted">{{ selectedProject.projectCode }} · {{ selectedProject.enabled ? '运行中' : '已停用' }}</p></div><div v-if="canManageProjectPool" class="team-context-actions"><el-button :disabled="!selectedProject.enabled || !applicationModels.length" type="primary" plain @click="openProjectAllocation">划拨项目额度</el-button><el-button v-if="selectedProject.enabled" type="danger" plain @click="disableProject(selectedProject)">停用项目</el-button></div></div>
+                  <div class="detail-metrics"><span>可用 Token<strong>{{ formatTokenCount(projectQuota?.balance.availableTokens ?? 0) }}</strong></span><span>冻结 Token<strong>{{ formatTokenCount(projectQuota?.balance.frozenTokens ?? 0) }}</strong></span><span>已消费 Token<strong>{{ formatTokenCount(projectQuota?.balance.consumedTokens ?? 0) }}</strong></span><span>已授权模型<strong>{{ projectQuota?.modelEntitlements.length ?? 0 }}</strong></span></div>
                   <section class="detail-block"><h3>项目模型授权</h3><div class="application-model-tags"><el-tag v-for="item in projectQuota?.modelEntitlements ?? []" :key="item.grantId" type="success" effect="plain">{{ item.modelName }} · {{ formatTokenCount(item.quotaLimit) }}</el-tag><span v-if="!projectQuota?.modelEntitlements.length" class="muted">尚未划拨模型额度。</span></div></section>
-                  <section class="detail-block"><div class="section-title"><div><h3>服务账号与应用 Key</h3><p class="muted">应用 Key 只显示一次；停用服务账号会立即停用对应 Key。</p></div><el-button type="primary" plain :disabled="!selectedProject.enabled" @click="openServiceAccountDialog">新建服务账号</el-button></div><el-table :data="serviceAccounts" size="small"><el-table-column prop="name" label="服务账号" min-width="160" /><el-table-column label="应用 Key" min-width="180"><template #default="scope"><code v-if="scope.row.keyPrefix">{{ scope.row.keyPrefix }}</code><span v-else class="muted">尚未生成</span></template></el-table-column><el-table-column label="状态" width="120"><template #default="scope"><el-tag :type="scope.row.enabled ? 'success' : 'info'">{{ scope.row.enabled ? '活动' : '已停用' }}</el-tag></template></el-table-column><el-table-column label="操作" min-width="230" fixed="right"><template #default="scope"><el-button v-if="scope.row.enabled && !scope.row.keyEnabled" text type="primary" @click="createApplicationKey(scope.row)">生成 Key</el-button><el-button v-else-if="scope.row.enabled" text type="primary" @click="createApplicationKey(scope.row, true)">轮换 Key</el-button><el-button v-if="scope.row.enabled" text type="danger" @click="updateServiceAccount(scope.row, false)">停用</el-button><el-button v-else text type="primary" @click="updateServiceAccount(scope.row, true)">启用</el-button></template></el-table-column></el-table><p v-if="!serviceAccounts.length" class="muted">尚未创建服务账号。</p></section>
+                  <section v-if="canManageProjectPool" class="detail-block"><div class="section-title"><div><h3>服务账号与应用 Key</h3><p class="muted">应用 Key 只显示一次；停用服务账号会立即停用对应 Key。</p></div><el-button type="primary" plain :disabled="!selectedProject.enabled" @click="openServiceAccountDialog">新建服务账号</el-button></div><el-table :data="serviceAccounts" size="small"><el-table-column prop="name" label="服务账号" min-width="160" /><el-table-column label="应用 Key" min-width="180"><template #default="scope"><code v-if="scope.row.keyPrefix">{{ scope.row.keyPrefix }}</code><span v-else class="muted">尚未生成</span></template></el-table-column><el-table-column label="状态" width="120"><template #default="scope"><el-tag :type="scope.row.enabled ? 'success' : 'info'">{{ scope.row.enabled ? '活动' : '已停用' }}</el-tag></template></el-table-column><el-table-column label="操作" min-width="230" fixed="right"><template #default="scope"><el-button v-if="scope.row.enabled && !scope.row.keyEnabled" text type="primary" @click="createApplicationKey(scope.row)">生成 Key</el-button><el-button v-else-if="scope.row.enabled" text type="primary" @click="createApplicationKey(scope.row, true)">轮换 Key</el-button><el-button v-if="scope.row.enabled" text type="danger" @click="updateServiceAccount(scope.row, false)">停用</el-button><el-button v-else text type="primary" @click="updateServiceAccount(scope.row, true)">启用</el-button></template></el-table-column></el-table><p v-if="!serviceAccounts.length" class="muted">尚未创建服务账号。</p></section>
                 </template><div v-else class="empty-state"><h2>请选择项目</h2><p>从左侧项目目录选择一个项目，查看其额度、模型权限和应用凭证。</p></div>
               </section>
             </section>
@@ -643,7 +652,7 @@ onMounted(() => { void loadCatalog(); });
       <el-form v-else-if="dialog === 'edit'" label-position="top"><el-form-item label="团队名称"><el-input v-model="teamForm.name" /></el-form-item><el-form-item label="团队 RPM"><el-input-number v-model="teamForm.teamRpm" :min="1" /></el-form-item><el-form-item label="团队并发"><el-input-number v-model="teamForm.teamConcurrency" :min="1" /></el-form-item><el-form-item label="模型并发"><el-input-number v-model="teamForm.modelConcurrency" :min="1" /></el-form-item></el-form>
       <el-form v-else-if="dialog === 'owner'" label-position="top"><el-form-item label="新的团队负责人"><el-select v-model="ownerUserId" filterable placeholder="选择启用且可分配的用户"><el-option v-for="user in ownerCandidates" :key="user.userId" :label="`${user.name} · ${user.email}`" :value="user.userId" /></el-select></el-form-item><p class="muted">当前负责人会保留在团队内并降为开发成员；目标用户不能属于其他活动团队。</p></el-form>
       <el-form v-else-if="dialog === 'member'" label-position="top"><el-form-item label="选择用户"><el-select v-model="candidateId" filterable placeholder="选择未分配用户"><el-option v-for="candidate in candidates" :key="candidate.userId" :label="`${candidate.name} · ${candidate.email}`" :value="candidate.userId"><span>{{ candidate.name }} · {{ candidate.email }}</span><small class="candidate-status">{{ candidate.rejoining ? `重新加入（此前在 ${candidate.previousTeamName || '其他团队'}）` : "未分配" }}</small></el-option></el-select></el-form-item><p v-if="!candidates.length" class="muted">暂无可加入的启用用户。请先在“用户管理”中新增用户，或移出其他团队成员。</p></el-form>
-      <el-form v-else-if="dialog === 'application-pool'" label-position="top"><el-form-item label="允许项目调用的模型"><el-select v-model="applicationPoolForm.modelNames" multiple filterable><el-option v-for="model in allModels" :key="model" :label="model" :value="model" /></el-select></el-form-item><el-form-item label="授予 Token"><QuotaAmountInput v-model="applicationPoolForm.tokenAllocation" scope="TEAM" @validity="valid => quotaInputValid = valid" /></el-form-item><el-form-item label="说明"><el-input v-model="applicationPoolForm.reason" /></el-form-item><p class="muted">Token 进入团队项目额度池，团队负责人会在此范围内为项目划拨额度。</p></el-form>
+      <el-form v-else-if="dialog === 'application-pool'" label-position="top"><el-form-item label="允许项目调用的模型"><el-select v-model="applicationPoolForm.modelName" filterable><el-option v-for="model in allModels" :key="model" :label="model" :value="model" /></el-select></el-form-item><el-form-item label="模型额度上限"><QuotaAmountInput v-model="applicationPoolForm.tokenAllocation" scope="TEAM" @validity="valid => quotaInputValid = valid" /></el-form-item><el-form-item label="说明"><el-input v-model="applicationPoolForm.reason" /></el-form-item><p class="muted">新增或提高上限会补充团队项目额度池；降低上限会回收未划拨 Token。已分配给项目的额度不能直接收回。</p></el-form>
       <el-form v-else-if="dialog === 'project'" label-position="top"><el-form-item label="项目名称"><el-input v-model="projectForm.name" maxlength="80" show-word-limit /></el-form-item><el-form-item label="项目编码"><el-input v-model="projectForm.projectCode" maxlength="64" show-word-limit placeholder="例如 rag-platform" /></el-form-item><p class="muted">项目编码创建后用于识别业务边界，请保持稳定且不包含敏感信息。</p></el-form>
       <el-form v-else-if="dialog === 'project-allocation'" label-position="top"><el-form-item label="项目模型"><el-select v-model="projectAllocationForm.modelNames" multiple filterable><el-option v-for="model in applicationModels" :key="model" :label="model" :value="model" /></el-select></el-form-item><el-form-item label="划拨 Token"><QuotaAmountInput v-model="projectAllocationForm.tokenAllocation" scope="TEAM" @validity="valid => quotaInputValid = valid" /></el-form-item><el-form-item label="说明"><el-input v-model="projectAllocationForm.reason" /></el-form-item><p class="muted">划拨后 Token 从团队项目额度池转入当前项目，开发额度池不受影响。</p></el-form>
       <el-form v-else-if="dialog === 'service-account'" label-position="top"><el-form-item label="服务账号名称"><el-input v-model="serviceAccountForm.name" maxlength="80" show-word-limit placeholder="例如 production-agent" /></el-form-item><p class="muted">服务账号用于 Agent、RAG 或业务服务调用；创建后需单独生成应用 Key。</p></el-form>

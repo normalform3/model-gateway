@@ -27,6 +27,7 @@ public class ProjectRepository {
     }
     public ProjectListResponse list(long teamId) { return new ProjectListResponse(jdbc.query("SELECT id,team_id,name,project_code,enabled,created_at FROM project WHERE team_id=? ORDER BY id DESC", (rs,row)->new ProjectItem(rs.getLong(1),rs.getLong(2),rs.getString(3),rs.getString(4),rs.getInt(5)==1,JdbcTime.toOffsetDateTime(rs.getTimestamp(6))), teamId)); }
     public ProjectItem update(long teamId, long projectId, UpdateProjectRequest request) { requireProject(teamId, projectId); jdbc.update("UPDATE project SET name=COALESCE(NULLIF(?,''),name), enabled=COALESCE(?,enabled), updated_at=? WHERE id=?", request.name(), request.enabled()==null?null:request.enabled()?1:0, now(), projectId); return project(projectId); }
+    public void requireProjectForTeam(long teamId, long projectId) { requireProjectExists(teamId, projectId); }
 
     @Transactional
     public ProjectQuotaResponse allocate(long teamId, long projectId, ProjectQuotaRequest request) {
@@ -65,10 +66,60 @@ public class ProjectRepository {
         jdbc.update("UPDATE quota_account SET available_tokens=available_tokens+?,version=version+1,updated_at=? WHERE id=?",request.tokenAllocation(),now(),account);
     }
 
+    /** Platform control-plane CRUD for one model in a team's application pool. The account delta keeps pool capacity and model limits aligned. */
+    @Transactional
+    public ApplicationQuotaBalanceResponse upsertTeamApplicationModel(long teamId, String modelName, UpsertApplicationPoolModelRequest request) {
+        team(teamId);
+        String model = modelName == null ? "" : modelName.trim();
+        if (model.isBlank()) throw bad("modelName is required.");
+        if (request.tokenAllocation() == null || request.tokenAllocation() < 0) throw bad("tokenAllocation must be zero or positive.");
+        Integer enabled = jdbc.queryForObject("SELECT COUNT(*) FROM provider_model WHERE model_name=? AND enabled=1", Integer.class, model);
+        if (enabled == null || enabled == 0) throw bad("Model was not found or disabled: " + model);
+        account("TEAM_APPLICATION", teamId);
+        List<PoolModel> current = jdbc.query("SELECT id,quota_limit FROM model_entitlement_grant WHERE team_id=? AND member_id IS NULL AND project_id IS NULL AND model_name=? AND pool_type='APPLICATION' AND status='ACTIVE' FOR UPDATE",
+                (rs, row) -> new PoolModel(rs.getLong(1), rs.getLong(2)), teamId, model);
+        long oldLimit = current.isEmpty() ? 0 : current.get(0).quotaLimit();
+        Long projectAllocated = jdbc.queryForObject("SELECT COALESCE(SUM(quota_limit),0) FROM model_entitlement_grant WHERE team_id=? AND project_id IS NOT NULL AND model_name=? AND pool_type='APPLICATION' AND status='ACTIVE'", Long.class, teamId, model);
+        if (request.tokenAllocation() < (projectAllocated == null ? 0 : projectAllocated)) {
+            throw new ModelGateException(ErrorCode.QUOTA_INSUFFICIENT, "The model limit cannot be lower than active project allocations.");
+        }
+        long accountId = id("SELECT id FROM quota_account WHERE account_type='TEAM_APPLICATION' AND owner_id=?", teamId);
+        long available = id("SELECT available_tokens FROM quota_account WHERE id=? FOR UPDATE", accountId);
+        long delta = request.tokenAllocation() - oldLimit;
+        if (delta < 0 && available < -delta) {
+            throw new ModelGateException(ErrorCode.QUOTA_INSUFFICIENT, "The application pool does not have enough unallocated quota to recover.");
+        }
+        if (current.isEmpty()) {
+            jdbc.update("INSERT INTO model_entitlement_grant(team_id,member_id,project_id,model_name,pool_type,quota_mode,quota_limit,status,reason,created_at) VALUES (?,NULL,NULL,?,'APPLICATION','DAILY',?,'ACTIVE',?,?)",
+                    teamId, model, request.tokenAllocation(), request.reason() == null ? "" : request.reason().trim(), now());
+        } else {
+            jdbc.update("UPDATE model_entitlement_grant SET quota_limit=?,reason=? WHERE id=?", request.tokenAllocation(), request.reason() == null ? "" : request.reason().trim(), current.get(0).id());
+        }
+        jdbc.update("UPDATE quota_account SET available_tokens=available_tokens+?,version=version+1,updated_at=? WHERE id=?", delta, now(), accountId);
+        return applicationBalance(accountId);
+    }
+
+    @Transactional
+    public ApplicationQuotaBalanceResponse deleteTeamApplicationModel(long teamId, String modelName) {
+        team(teamId);
+        String model = modelName == null ? "" : modelName.trim();
+        List<PoolModel> current = jdbc.query("SELECT id,quota_limit FROM model_entitlement_grant WHERE team_id=? AND member_id IS NULL AND project_id IS NULL AND model_name=? AND pool_type='APPLICATION' AND status='ACTIVE' FOR UPDATE",
+                (rs, row) -> new PoolModel(rs.getLong(1), rs.getLong(2)), teamId, model);
+        if (current.isEmpty()) throw bad("Application pool model was not found.");
+        Long projectAllocated = jdbc.queryForObject("SELECT COALESCE(SUM(quota_limit),0) FROM model_entitlement_grant WHERE team_id=? AND project_id IS NOT NULL AND model_name=? AND pool_type='APPLICATION' AND status='ACTIVE'", Long.class, teamId, model);
+        if (projectAllocated != null && projectAllocated > 0) throw bad("Recover project allocations before deleting this model.");
+        long accountId = id("SELECT id FROM quota_account WHERE account_type='TEAM_APPLICATION' AND owner_id=?", teamId);
+        long available = id("SELECT available_tokens FROM quota_account WHERE id=? FOR UPDATE", accountId);
+        if (available < current.get(0).quotaLimit()) throw new ModelGateException(ErrorCode.QUOTA_INSUFFICIENT, "The application pool does not have enough unallocated quota to recover.");
+        jdbc.update("DELETE FROM model_entitlement_grant WHERE id=?", current.get(0).id());
+        jdbc.update("UPDATE quota_account SET available_tokens=available_tokens-?,version=version+1,updated_at=? WHERE id=?", current.get(0).quotaLimit(), now(), accountId);
+        return applicationBalance(accountId);
+    }
+
     @Transactional
     public ProjectServiceAccountItem createServiceAccount(long teamId,long projectId,CreateProjectServiceAccountRequest request) { requireProject(teamId,projectId); long id=GeneratedKeys.insert(jdbc,"INSERT INTO project_service_account(project_id,name,enabled,created_at,updated_at) VALUES (?,?,1,?,?)",projectId,request.name().trim(),now(),now()); return serviceAccount(id); }
     public ProjectServiceAccountListResponse serviceAccounts(long teamId, long projectId) {
-        requireProject(teamId, projectId);
+        requireProjectExists(teamId, projectId);
         return new ProjectServiceAccountListResponse(jdbc.query("""
                 SELECT sa.id, sa.project_id, sa.name, sa.enabled, sa.created_at,
                        k.id AS key_id, k.key_prefix, k.enabled AS key_enabled, k.created_at AS key_created_at
@@ -103,15 +154,18 @@ public class ProjectRepository {
 
     private ProjectItem project(long id) { return jdbc.queryForObject("SELECT id,team_id,name,project_code,enabled,created_at FROM project WHERE id=?",(rs,row)->new ProjectItem(rs.getLong(1),rs.getLong(2),rs.getString(3),rs.getString(4),rs.getInt(5)==1,JdbcTime.toOffsetDateTime(rs.getTimestamp(6))),id); }
     private void requireProject(long team,long project) { Integer n=jdbc.queryForObject("SELECT COUNT(*) FROM project WHERE id=? AND team_id=? AND enabled=1",Integer.class,project,team); if(n==null||n==0)throw bad("Project was not found or is disabled."); }
+    private void requireProjectExists(long team,long project) { Integer n=jdbc.queryForObject("SELECT COUNT(*) FROM project WHERE id=? AND team_id=?",Integer.class,project,team); if(n==null||n==0)throw bad("Project was not found."); }
     private void requireOwner(long team,long member) { Integer n=jdbc.queryForObject("SELECT COUNT(*) FROM team t JOIN team_member m ON m.id=? AND m.team_id=t.id AND m.user_id=t.owner_user_id AND m.role='OWNER' AND m.enabled=1 WHERE t.id=? AND t.enabled=1",Integer.class,member,team);if(n==null||n==0)throw bad("This operation requires the active team owner."); }
     private long requireTeamApplicationModel(long team,String model) { Long n=jdbc.queryForObject("SELECT id FROM model_entitlement_grant WHERE team_id=? AND member_id IS NULL AND project_id IS NULL AND model_name=? AND pool_type='APPLICATION' AND status='ACTIVE'",Long.class,team,model);if(n==null)throw bad("Model is not granted to the team application pool: "+model); return n; }
     private Team team(long id){return jdbc.queryForObject("SELECT organization_id FROM team WHERE id=? AND enabled=1",(rs,row)->new Team(rs.getLong(1)),id);}
     private void account(String type,long owner){jdbc.update("INSERT IGNORE INTO quota_account(account_type,owner_id,available_tokens,frozen_tokens,consumed_tokens,version,updated_at) VALUES (?,?,0,0,0,0,?)",type,owner,now());}
     private long id(String sql,Object...args){Long value=jdbc.queryForObject(sql,Long.class,args);if(value==null)throw bad("Required account was not found.");return value;}
+    private ApplicationQuotaBalanceResponse applicationBalance(long accountId) { return jdbc.queryForObject("SELECT owner_id,available_tokens,frozen_tokens,consumed_tokens,updated_at FROM quota_account WHERE id=?", (rs,row) -> new ApplicationQuotaBalanceResponse(rs.getLong(1),rs.getLong(2),rs.getLong(3),rs.getLong(4),JdbcTime.toOffsetDateTime(rs.getTimestamp(5))), accountId); }
     private static List<String> models(List<String> values){return values==null?List.of():List.copyOf(new LinkedHashSet<>(values.stream().filter(v->v!=null&&!v.isBlank()).map(String::trim).toList()));}
     private static Long nullableLong(java.sql.ResultSet rs, String column) throws java.sql.SQLException { long value = rs.getLong(column); return rs.wasNull() ? null : value; }
     private static java.sql.Timestamp now(){return JdbcTime.toTimestamp(OffsetDateTime.now());}
     private static ModelGateException bad(String m){return new ModelGateException(ErrorCode.BAD_MODEL_REQUEST,m);}
     private record Team(long organizationId){}
+    private record PoolModel(long id, long quotaLimit){}
     private record ServiceScope(long organizationId,long teamId,long projectId){}
 }

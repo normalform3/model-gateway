@@ -21,9 +21,11 @@ import com.modelgate.quota.QuotaService;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -377,6 +379,17 @@ public class AdminController {
                 .thenReturn(org.springframework.http.ResponseEntity.noContent().build());
     }
 
+    @PutMapping("/teams/{teamId}/application-entitlements/{modelName}")
+    public Mono<ApplicationQuotaBalanceResponse> upsertTeamApplicationModel(@PathVariable("teamId") long teamId, @PathVariable("modelName") String modelName,
+                                                                            @Valid @RequestBody UpsertApplicationPoolModelRequest request) {
+        return Mono.fromCallable(() -> projectRepository.upsertTeamApplicationModel(teamId, modelName, request)).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @DeleteMapping("/teams/{teamId}/application-entitlements/{modelName}")
+    public Mono<ApplicationQuotaBalanceResponse> deleteTeamApplicationModel(@PathVariable("teamId") long teamId, @PathVariable("modelName") String modelName) {
+        return Mono.fromCallable(() -> projectRepository.deleteTeamApplicationModel(teamId, modelName)).subscribeOn(Schedulers.boundedElastic());
+    }
+
     @GetMapping("/teams/{teamId}/application-quota")
     public Mono<ApplicationQuotaOverview> teamApplicationQuota(@PathVariable("teamId") long teamId) {
         return Mono.fromCallable(() -> new ApplicationQuotaOverview(teamId,
@@ -387,9 +400,12 @@ public class AdminController {
 
     @GetMapping("/teams/{teamId}/projects/{projectId}/application-quota")
     public Mono<ProjectApplicationQuotaOverview> projectApplicationQuota(@PathVariable("teamId") long teamId, @PathVariable("projectId") long projectId) {
-        return Mono.fromCallable(() -> new ProjectApplicationQuotaOverview(projectId,
-                quotaAccountRepository.findProjectApplicationQuota(projectId),
-                modelEntitlementRepository.projectApplicationEntitlements(teamId, projectId).items()))
+        return Mono.fromCallable(() -> {
+            projectRepository.requireProjectForTeam(teamId, projectId);
+            return new ProjectApplicationQuotaOverview(projectId,
+                    quotaAccountRepository.findProjectApplicationQuota(projectId),
+                    modelEntitlementRepository.projectApplicationEntitlements(teamId, projectId).items());
+        })
                 .subscribeOn(Schedulers.boundedElastic());
     }
 

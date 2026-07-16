@@ -18,6 +18,7 @@ import com.modelgate.common.domain.BudgetPolicy;
 import com.modelgate.common.domain.EntitlementQuotaLimits;
 import com.modelgate.common.domain.QuotaMode;
 import com.modelgate.infrastructure.db.ModelEntitlementRepository;
+import com.modelgate.infrastructure.db.ProjectRepository;
 import com.modelgate.infrastructure.db.TeamEntitlementRepository;
 import com.modelgate.common.domain.RateLimitPolicy;
 import com.modelgate.common.event.UsageReportedEvent;
@@ -427,6 +428,31 @@ class MvpUnitTests {
 
         assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("JOIN team t ON t.id = meg.team_id"));
         assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("meg.member_id IS NULL") && sql.contains("meg.status = 'ACTIVE'") && sql.contains("t.enabled = 1"));
+    }
+
+    @Test
+    void developmentAndApplicationEntitlementQueriesUseSeparatePoolFilters() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+        ModelEntitlementRepository repository = new ModelEntitlementRepository(jdbcTemplate);
+
+        repository.teamEntitlements(2L);
+        repository.teamApplicationEntitlements(2L);
+        repository.projectApplicationEntitlements(2L, 8L);
+
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("project_id IS NULL") && sql.contains("pool_type = 'DEVELOPMENT'"));
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("project_id IS NULL") && sql.contains("pool_type = 'APPLICATION'"));
+        assertThat(jdbcTemplate.queries).anyMatch(sql -> sql.contains("project_id = ?") && sql.contains("pool_type = 'APPLICATION'"));
+    }
+
+    @Test
+    void disablingAProjectServiceAccountAlsoDisablesItsApplicationKeys() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+        ProjectRepository repository = new ProjectRepository(jdbcTemplate);
+
+        repository.updateServiceAccount(2L, 8L, 12L, new com.modelgate.common.api.AdminDtos.UpdateProjectServiceAccountRequest(false));
+
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().startsWith("UPDATE project_service_account SET enabled=?") && Integer.valueOf(0).equals(call.args()[0]));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("UPDATE virtual_api_key SET enabled=0") && call.sql().contains("credential_type='APPLICATION'"));
     }
 
     @Test
