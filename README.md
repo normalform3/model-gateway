@@ -1,161 +1,90 @@
 # ModelGate
 
-ModelGate 是面向企业内部 Agent、AI 应用和研发工具的模型调用网关与用量计费平台。它位于业务系统与模型供应商之间，对调用方提供兼容 OpenAI 的统一接口；对平台侧集中处理鉴权、限流、并发控制、Token 额度、流式转发、用量统计和费用归因。
+ModelGate 是面向 Agent、AI 应用和研发工具的模型调用网关与用量计费平台，对外提供兼容 OpenAI 的 Chat Completions 接口。
 
-在多团队、多应用直接接入模型供应商的场景中，真实密钥容易分散在不同项目中，成本难以归因，调用配额与故障处理也缺少统一边界。ModelGate 通过虚拟 Key 隔离 Provider 凭据，通过 Redis 在请求主链路完成实时保护，并将用量、账单和审计写入可追溯的异步账本，从而将模型调用治理收敛为一套基础设施能力。
+当多个应用直接调用模型供应商时，真实 API Key 往往分散在不同代码库中；调用成本难以按团队、成员或项目归因；限流、并发和 Token 额度也无法在一个入口统一控制。
+
+ModelGate 使用虚拟 API Key 隔离 Provider 凭据，在 Redis 中完成限流、并发和额度预占，通过 WebFlux 转发普通响应与 SSE 流式响应，并以 Outbox、RocketMQ 和 MySQL 记录用量、账单与审计事实。
+
+![ModelGate 全网关仪表盘](docs/images/admin-dashboard-overview.png)
+
+> 管理控制台主页展示供应商、团队、虚拟 Key、请求量、保护拒绝和请求结果趋势；截图数据来自本地 Showcase Mock 数据。
+
+## 核心能力
+
+| 能力 | 已实现行为 | 关键组件 |
+| --- | --- | --- |
+| 统一调用入口 | 提供 `POST /v1/chat/completions`，支持普通 JSON 与 SSE | Spring WebFlux、Provider Adapter |
+| 虚拟 API Key | 只保存 Key 前缀和 SHA-256 哈希；校验 Key 状态与模型权限 | Caffeine、Redis、MySQL |
+| 请求保护 | 在一次 Redis Lua 调用中校验 RPM、TPM、并发和额度 | Redis ZSET / Hash、Lua |
+| 模型额度 | 按团队与成员（或项目）逐模型、逐周期预占、结算与释放 Token | Redis、MySQL 权益记录 |
+| Provider 接入 | 支持 Mock 与 OpenAI-Compatible Provider；凭据池轮询和首包前切换 | AES-GCM、WebClient |
+| 异步计量 | 请求完成后写入 Usage Outbox，由消费者落用量、账单、预算告警和审计 | RocketMQ、MySQL 唯一约束 |
+| 管理控制台 | 提供团队、成员、模型、Key、额度、账单和网关保护页面 | Vue 3、Element Plus、ECharts |
+
+> 管理控制台当前未接入用户登录与 RBAC，页面中的角色切换仅用于开发和演示。模型调用接口已实现虚拟 API Key 鉴权、Key 状态校验和模型权限控制。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    Client["Agent / AI 应用 / OpenAI SDK"] -->|"Bearer 虚拟 Key"| Gateway["WebFlux Gateway\nChatGatewayService"]
+    Gateway --> Auth["VirtualKeyService\nCaffeine → Redis → MySQL"]
+    Gateway --> Quota["QuotaService\n内嵌 Redis Lua"]
+    Quota --> Redis[(Redis)]
+    Gateway --> Provider["Mock / OpenAI-Compatible Provider"]
+    Gateway --> Outbox["UsageCompletedOutboxService"]
+    Outbox --> Mysql[(MySQL\n请求、Outbox、账单事实)]
+    Outbox --> MQ["RocketMQ"]
+    MQ --> Consumers["用量 / 额度 / 账单 / 审计消费者"]
+    Consumers --> Mysql
+```
+
+调用进入网关后，先解析虚拟 Key 并校验模型权限，再执行 Redis 限流、并发和额度预占。Provider 返回普通响应或流式片段后，网关结算或释放额度，并在同一请求终态事务中写入 Outbox；后续消费者异步生成用量、账单和审计记录。
 
 ## 项目演示
 
-网关中包含平台管理员、团队负责人和开发成员三大角色。暂未接入真实登陆鉴权，主要目的在于开发阶段演示不同层级的职责边界。
-
 ### 平台管理员
 
-平台管理员负责全局运行状态、资源边界和成本归因。
-
-#### 全网关运行总览
-
-管理员可以查看已启用的供应商、团队和虚拟 Key，以及近 24 小时的请求量、成功率、保护拒绝与非保护失败。趋势图和请求结果构成帮助区分“网关主动保护”与“上游故障”的第一层运营视图。
+管理员可查看全网请求量、成功率、保护拒绝和 Provider 调用失败。仪表盘分别统计网关限流、额度拒绝和上游调用失败，便于判断请求失败发生在网关侧还是 Provider 侧。
 
 ![全网关仪表盘：请求健康度与运行趋势](docs/images/admin-dashboard-overview.png)
 
-#### 实时保护压力与全局阈值
-
-限流页直接呈现 Redis 中的全局 RPM、并发占用、保护拒绝趋势和命中维度。管理员可以维护全局保护阈值；团队级策略仍在团队管理中维护，从而保留平台与团队两级控制边界。
+管理员可以查看 Redis 中的全局 RPM、并发占用、保护拒绝趋势和命中维度，并修改全局 RPM 与并发阈值。团队级限流配置在团队详情中单独维护。
 
 ![全局网关保护：并发、限流与拒绝命中维度](docs/images/admin-gateway-protection.png)
 
-#### 成本趋势与多维筛选
-
-账单分析可以按时间、团队、项目、成员、供应商、实际模型和调用类型筛选，分别查看 Token 与费用趋势。金额按币种展示，不在界面中做未经配置的汇率换算。
+账单分析支持按时间、团队、项目、成员、供应商、实际模型和调用类型筛选，并分别展示 Token 与费用趋势。金额按币种返回，不在查询层做汇率换算。
 
 ![账单分析：Token 与费用趋势](docs/images/admin-billing-overview.png)
 
-#### 账单归因与明细下钻
-
-管理员可从成员开发成本、Provider / 实际模型成本下钻到每条账单事实。成员开发与项目应用走并行归因链，避免将不同视图的汇总金额再次相加。
+账单页可从成员开发成本或 Provider / 实际模型成本下钻到单条账单记录，记录中保留团队、项目、成员、调用类型、输入/输出 Token 和金额。
 
 ![账单明细：成员、项目、模型与调用类型归因](docs/images/admin-billing-ledger.png)
 
-#### 团队目录与运行状态
-
-企业团队页集中查看团队负责人、成员数、活跃 Key、RPM 与并发策略，并以团队为入口进入额度、成员和授权管理。这样可以先识别运行中的资源边界，再处理具体的团队配置。
+管理员可从团队列表查看负责人、成员数量、活跃 Key 数量、RPM 与并发配置，并进入团队详情继续管理成员与模型权限。
 
 ![企业团队：运行团队目录与团队概览](docs/images/admin-team-directory.png)
 
-#### 团队额度健康度
-
-管理员可以按当前周期观察团队已分配、已用、冻结和剩余额度，并按模型比较额度分布与用量趋势。这使额度配置和运行时的冻结状态能够在同一工作台中核对。
+团队详情按当前周期展示已分配、已用、冻结和剩余额度，并提供按模型的额度对比、近 7 天 Token 用量和成员用量排行。
 
 ![团队周期额度：模型对比、额度构成与成员用量排名](docs/images/admin-team-quota.png)
 
-#### Provider 与直接模型目录
-
-模型供应商页面维护 Provider、直接模型名与输入/输出单价。调用方始终使用全局唯一的真实模型名；Provider 的多把凭据由服务端加密保存并在网关侧选择，界面不会回显明文。
+模型供应商页管理 Provider、直接模型名和输入/输出单价。Provider 凭据由服务端加密保存，控制台不回显明文；调用方只传全局唯一的模型名。
 
 ![模型供应商：Provider 列表与直接模型价格目录](docs/images/admin-provider-catalog.png)
 
 ### 团队负责人
 
-团队负责人只处理自己所属团队的资源：查看团队额度与成员权益，创建项目，将团队项目额度划拨给项目，并管理项目服务账号和应用 Key。
-
-#### 项目额度池与应用凭据
-
-负责人可以将团队项目额度池中的模型额度分配给具体项目，查看可用、冻结与已消费 Token，并在项目内创建服务账号和轮换应用 Key。开发者个人额度与项目应用额度相互独立，避免研发工具和生产应用抢占同一个预算池。
+团队负责人管理所属团队的项目额度池：创建项目，将团队项目额度分配给项目，查看可用、冻结与已消费 Token，并在项目内管理服务账号与应用 Key。开发者个人额度和项目应用额度使用独立额度池。
 
 ![团队项目额度池：项目分配、服务账号与应用 Key](docs/images/team-owner-project-quota.png)
 
 ### 开发成员
 
-开发成员面向个人使用：查看自己已授权模型的当前周期额度、已用比例与剩余额度，并在个人 Key 页面生成或轮换仅属于自己的虚拟 Key。
-
-#### 个人开发者工作台
-
-个人工作台将额度总览、模型占用和逐模型额度明细放在一起。开发者能在调用前判断模型是否可用、当前周期还剩多少资源；网关在实际请求时仍会以 Redis 原子校验作为最终准入依据。
+开发成员在个人工作台查看已授权模型、当前周期额度、已用比例和剩余额度；个人 Key 页面支持生成或轮换仅绑定该成员的虚拟 Key。网关在请求进入 Provider 前仍会重新校验额度状态。
 
 ![开发者工作台：个人额度、模型占用与授权明细](docs/images/developer-workbench.png)
-
-## 背景与目标
-
-当多个 Agent、内部工具和业务服务直接调用模型供应商时，真实密钥会散落在各个项目中，限流与成本边界难以统一，出现故障也缺少一致的处理方式。ModelGate 将这些共性问题收敛为一个独立的基础设施层：
-
-- 调用方只持有可独立吊销的虚拟 API Key，不接触真实 Provider 凭据。
-- 以 OpenAI 风格 `POST /v1/chat/completions` 统一普通响应与 SSE 流式响应。
-- 在 Redis 内原子执行多维限流、并发控制与两级模型额度预占，避免并发下部分扣减或超额消费。
-- 将请求事实、用量、账单和额度流水落到 MySQL，使费用归因能够追溯与对账。
-- 通过 Outbox 与 RocketMQ 解耦计量和账单消费者，并以幂等约束应对重复投递。
-- 以本地 Mock Provider 覆盖正常、慢响应、超时、429、500、流中断等场景，不依赖真实模型费用即可演练主链路。
-
-## 核心能力
-
-| 领域 | 已实现能力 | 设计重点 |
-| --- | --- | --- |
-| 统一网关 | OpenAI 风格 Chat Completions；普通 JSON 与 SSE 流式转发 | WebFlux 非阻塞链路，流式内容逐片返回 |
-| 凭据安全 | 虚拟 Key 哈希存储、仅首次展示明文；Provider 凭据 AES-GCM 加密 | 调用方与真实 Provider 密钥隔离 |
-| 授权与缓存 | 团队/成员两层模型权益；Caffeine → Redis → MySQL 三级读取 | 控制面变更后通过 Redis Pub/Sub 失效本地缓存 |
-| 流量保护 | Key、团队、全局 RPM / TPM / 并发控制 | 单次 Redis Lua 原子检查，不产生部分扣减 |
-| 额度管理 | 团队与成员（或项目）逐模型、逐周期额度预占、结算、释放 | 请求失败、超时或取消后正确清理冻结与并发状态 |
-| Provider 接入 | Mock Provider、OpenAI-Compatible Provider、凭据池轮询 | 首包前可切换一次备用凭据；错误不泄露私有配置 |
-| 异步计量 | Usage Outbox、RocketMQ 投递、用量/账单/审计消费者 | 消费记录与业务唯一键确保重复消费不重复计费 |
-| 管理控制台 | 团队、成员、模型、Key、额度、用量、账单与保护概览 | 面向运维和排障的密集型工作台，而非营销页面 |
-
-## 一次请求如何流转
-
-```text
-Client / Agent
-      │  Bearer 虚拟 Key + OpenAI-style request
-      ▼
-ModelGate 数据面（Spring WebFlux）
-      │  1. Caffeine → Redis → MySQL 鉴权上下文
-      │  2. 校验团队与成员的模型权益
-      │  3. Redis Lua：限流 / 并发 / Token 额度原子预占
-      │  4. 选择 Provider 凭据并转发普通响应或 SSE
-      ▼
-Model Provider / Mock Provider
-      │  usage、延迟、状态
-      ▼
-Usage Outbox → RocketMQ → 用量 / 账单 / 预算 / 审计消费者 → MySQL 事实账本
-```
-
-这里最重要的边界是：Redis 负责“此刻能否放行”的实时决策，MySQL 负责最终事实与账本；RocketMQ 传播领域事件，不承担普通日志职责。这样可以避免把每次模型请求都压到数据库，也能在异步重试与重复消费时保持最终一致。
-
-## 关键工程取舍
-
-### 额度不能只扣余额
-
-模型请求开始前并不知道实际输出 Token。网关先按输入和 `max_tokens` 估算并冻结额度，完成后按实际用量结算，失败时释放冻结；团队和成员（或应用）两个层级同步执行。核心状态转换由 Redis Lua 原子完成，因此并发请求不会只扣到某个维度就失败。
-
-### SSE 是完整的资源生命周期
-
-流式请求不能等上游完整响应再返回。网关会持续转发上游片段，并处理首事件超时、流中空闲超时、上游中断与客户端取消。无论哪种结束路径，都要恰好一次地释放并发、结算或释放冻结额度，并生成对应的用量事件。
-
-### 异步并不等于可以重复记账
-
-请求主链路写入确定性事件 ID 的 Outbox；消费者在同一数据库事务中记录消费状态并执行业务处理，账单和额度流水另有业务唯一约束兜底。这个设计针对的是“数据库提交成功但 ACK 失败”这类常见重复投递场景，而不是不切实际地宣称端到端 exactly-once。
-
-## 技术栈
-
-- 后端：Java 17、Spring Boot 3、Spring WebFlux、Reactor、Flyway、Maven 多模块
-- 数据与中间件：MySQL、Redis、Redis Lua、RocketMQ
-- 安全与可靠性：AES-GCM、Caffeine、Outbox、消费幂等、Provider 超时与首包前凭据切换
-- 前端：Vue 3、TypeScript、Vite、Element Plus、ECharts
-
-## 项目结构
-
-```text
-model-gate
-├── modelgate-bootstrap       # 应用入口、HTTP API、Provider 转发
-├── modelgate-auth            # 虚拟 Key、权限与缓存失效
-├── modelgate-quota           # Token 估算、额度预占与结算
-├── modelgate-provider        # Provider 抽象、Mock Provider
-├── modelgate-usage           # Outbox、用量、预算与审计
-├── modelgate-billing         # RocketMQ 消费与账单
-├── modelgate-infrastructure  # MySQL / Redis 等基础设施实现
-├── modelgate-common          # API、领域对象与事件契约
-├── frontend                  # Vue 管理控制台
-└── tools/modelgate-test-runner # 多开发者 Mock 调用测试工具
-```
-
-第一版保持为 Maven 模块化单体：部署和本地调试更简单，代码边界则为未来将延迟敏感的数据面与吞吐优先的异步计量拆分预留空间。
 
 ## 快速开始
 
@@ -165,9 +94,9 @@ model-gate
 - Maven 3.9+
 - MySQL 8+
 - Redis 6+
-- Node.js 20+（仅运行管理控制台时需要）
+- Node.js 20+（运行管理控制台时需要）
 
-本地默认连接 `localhost` 上的 MySQL 数据库 `modelgate`（用户名、密码均为 `modelgate`）和 Redis。请先创建本地数据库，并按需通过环境变量覆盖连接信息。开发期默认关闭 RocketMQ；开启后才会将 Usage Event 投递给实际消费者。
+本地默认连接 `localhost` 上的 MySQL 数据库 `modelgate`（用户名、密码均为 `modelgate`）和 Redis。请先创建本地数据库，并按需通过环境变量覆盖连接信息。开发期默认关闭 RocketMQ；启用后才会向实际消费者投递 Usage Event。
 
 ```bash
 export MODELGATE_MYSQL_URL='jdbc:mysql://localhost:3306/modelgate?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true'
@@ -193,7 +122,7 @@ npm install
 npm run dev
 ```
 
-控制台默认地址为 `http://localhost:5173`，Vite 会将 `/admin` 与 `/v1` 代理到 `http://localhost:8080`。初始化一组可重复执行的演示数据：
+控制台默认地址为 `http://localhost:5173`，Vite 会将 `/admin` 与 `/v1` 代理到 `http://localhost:8080`。初始化可重复执行的 Showcase 数据：
 
 ```bash
 curl -X POST http://localhost:8080/admin/bootstrap/showcase
@@ -201,15 +130,74 @@ curl -X POST http://localhost:8080/admin/bootstrap/showcase
 
 > `showcase` 只写入本地 Mock 数据，不生成可用明文 Key、不调用真实 Provider，也不会投递 RocketMQ。更多环境配置、SSE 调用和故障演练方式请见[运行手册](docs/MVP_RUNBOOK.md)。
 
+## 技术设计与代码证据
+
+### 虚拟 API Key 鉴权与三级缓存
+
+网关从 `Authorization: Bearer <key>` 读取虚拟 Key，计算 SHA-256 哈希后按 Caffeine、Redis、MySQL 顺序查询 `ApiKeyContext`。读取到上下文后会检查 Key 是否启用、是否过期，以及当前请求模型是否在授权集合内；管理端禁用 Key 或调整权限时会清理缓存并发布失效事件。
+
+相关实现：
+
+- [VirtualKeyService](modelgate-auth/src/main/java/com/modelgate/auth/VirtualKeyService.java)：Key 哈希、认证、模型权限检查、Caffeine 和 Redis 缓存。
+
+### Redis Lua 原子保护
+
+请求进入 Provider 前，[QuotaService](modelgate-quota/src/main/java/com/modelgate/quota/QuotaService.java) 的内嵌 `RESERVE_SCRIPT` 在一次 Lua 调用中检查 Key / 团队 RPM、团队 TPM、全局 RPM、Key / 团队 / 模型 / 全局并发，以及团队和成员两层模型额度。所有检查通过后才写入限流、并发和冻结状态；任一维度不满足时不会修改其他状态。
+
+同一类脚本还负责结算与释放：成功请求按实际 Token 结算，未产生输出的失败或取消请求释放预占额度，并移除并发记录。
+
+相关实现：
+
+- [QuotaService](modelgate-quota/src/main/java/com/modelgate/quota/QuotaService.java)：`RESERVE_SCRIPT`、`SETTLE_SCRIPT`、`RELEASE_SCRIPT` 与 `reserve` / `settle` / `release` 方法。
+
+### 普通响应与 SSE 生命周期
+
+[ChatGatewayService](modelgate-bootstrap/src/main/java/com/modelgate/bootstrap/api/ChatGatewayService.java) 分别处理普通响应和 SSE。流式路径通过 `Flux` 逐片转发内容，记录首 Token 时间与已生成内容；流完成、超时、上游中断或客户端取消时，只执行一次结算或释放，并写入终态事件。OpenAI-Compatible Provider 的 SSE 解析和凭据轮换在 [OpenAiCompatibleProviderClient](modelgate-bootstrap/src/main/java/com/modelgate/bootstrap/api/OpenAiCompatibleProviderClient.java) 中实现，首事件和流中空闲超时由 [ProviderTimeouts](modelgate-bootstrap/src/main/java/com/modelgate/bootstrap/api/ProviderTimeouts.java) 处理。
+
+相关实现：
+
+- [ChatGatewayService](modelgate-bootstrap/src/main/java/com/modelgate/bootstrap/api/ChatGatewayService.java)：普通调用、SSE 转发、取消与失败清理。
+- [OpenAiCompatibleProviderClient](modelgate-bootstrap/src/main/java/com/modelgate/bootstrap/api/OpenAiCompatibleProviderClient.java)：OpenAI-Compatible 普通与流式请求。
+- [ProviderTimeouts](modelgate-bootstrap/src/main/java/com/modelgate/bootstrap/api/ProviderTimeouts.java)：首事件和空闲超时。
+
+### Outbox 与账单消费幂等
+
+[UsageCompletedOutboxService](modelgate-usage/src/main/java/com/modelgate/usage/UsageCompletedOutboxService.java) 在同一事务中更新请求终态并插入带确定性事件 ID 的 `usage_event_outbox` 记录。[RocketMqOutboxDispatcher](modelgate-usage/src/main/java/com/modelgate/usage/RocketMqOutboxDispatcher.java) 只发送已提交的 Outbox 行，发送失败后重新安排投递。账单消费者先向 `mq_consume_record` 写入 `(eventId, consumerGroup)`；重复消息因唯一键冲突直接返回，避免重复生成账单。
+
+相关实现：
+
+- [UsageCompletedOutboxService](modelgate-usage/src/main/java/com/modelgate/usage/UsageCompletedOutboxService.java)：请求终态与 Outbox 同事务写入。
+- [RocketMqOutboxDispatcher](modelgate-usage/src/main/java/com/modelgate/usage/RocketMqOutboxDispatcher.java)：Outbox 轮询、租约和失败重试。
+- [BillingService](modelgate-billing/src/main/java/com/modelgate/billing/BillingService.java)：账单消费者入口。
+- [UsageEventConsumerRepository](modelgate-infrastructure/src/main/java/com/modelgate/infrastructure/db/UsageEventConsumerRepository.java)：消费去重记录。
+
+## 项目结构
+
+```text
+model-gate
+├── modelgate-bootstrap         # 应用入口、HTTP API、Provider 转发
+├── modelgate-auth              # 虚拟 Key、权限与缓存失效
+├── modelgate-quota             # Token 估算、额度预占与结算
+├── modelgate-provider          # Provider 抽象、Mock Provider
+├── modelgate-usage             # Outbox、用量、预算与审计
+├── modelgate-billing           # RocketMQ 消费与账单
+├── modelgate-infrastructure    # MySQL / Redis 等基础设施实现
+├── modelgate-common            # API、领域对象与事件契约
+├── frontend                    # Vue 管理控制台
+└── tools/modelgate-test-runner # 多开发者 Mock 调用测试工具
+```
+
+后端使用 Java 17、Spring Boot 3、Spring WebFlux、Flyway、MySQL、Redis 与 RocketMQ；前端使用 Vue 3、TypeScript、Vite、Element Plus 与 ECharts。
+
 ## 验证重点
 
-项目以 Mock Provider 作为可控测试替身，重点覆盖以下风险最高的路径：
+Mock Provider 用于覆盖不依赖真实模型费用的主链路与故障场景：
 
-- 普通响应与 SSE 逐片转发，而不是缓冲完整响应。
-- 限流、并发与两层额度在并发下原子生效；失败请求释放冻结额度。
-- 首事件超时、流中断和客户端取消后，不泄漏并发计数，也不重复结算。
-- Usage Event 重复投递时，用量、账单和额度流水保持幂等。
-- Key 禁用或权限收回后，Redis 与本地鉴权缓存及时失效。
+- 普通响应与 SSE 均逐片转发，不等待完整上游响应。
+- 并发请求下，限流、并发和两层额度只能全部成功或全部拒绝。
+- 首事件超时、流中断和客户端取消后，并发记录与冻结额度只清理一次。
+- 同一个 Usage Event 重复投递时，不重复写入用量、账单和额度流水。
+- Key 禁用或模型权限收回后，Redis 和本地鉴权缓存失效。
 
 运行后端测试：
 
@@ -224,11 +212,11 @@ cd frontend
 npm run build
 ```
 
-完整的测试与压测场景见[测试与压测方案](docs/TESTING.md)。目前不在 README 中虚构吞吐或 P99 数字；这类指标应来自可复现的压测环境与报告。
+完整的测试与压测场景见[测试与压测方案](docs/TESTING.md)。README 不包含未经可复现压测验证的吞吐、P95 或 P99 数据。
 
-## 当前边界与后续方向
+## 当前边界与路线图
 
-当前版本以核心调用闭环和可靠性设计为重点，已具备 Mock 与 OpenAI-Compatible 接入、团队/成员/项目额度、流式调用和管理台；真实登录与 RBAC、跨模型智能路由、熔断降级、全链路监控和 Provider 账单回查仍属于后续演进方向。详细计划见[开发路线图](docs/ROADMAP.md)。
+当前版本已实现 Mock 与 OpenAI-Compatible 接入、虚拟 API Key、团队 / 成员 / 项目额度、流式调用、异步计量和管理控制台。管理控制台尚未接入真实登录与 RBAC；跨模型智能路由、熔断降级、全链路监控和 Provider 账单回查属于后续工作。详细计划见[开发路线图](docs/ROADMAP.md)。
 
 ## 文档导航
 
@@ -242,7 +230,7 @@ npm run build
 
 ## 安全说明
 
-- 仓库不应提交真实 Provider API Key、私有端点、Workspace / 租户标识或签名 URL。
+- 仓库不提交真实 Provider API Key、私有端点、Workspace / 租户标识或签名 URL。
 - 虚拟 API Key 仅保存前缀和哈希；明文只在生成或轮换时返回一次。
-- Provider 凭据以 AES-GCM 密文保存，API 与日志均不返回明文。
-- 管理台中的角色切换当前仅用于开发期展示和默认筛选，不构成生产 RBAC。
+- Provider 凭据以 AES-GCM 密文保存，API 与日志不返回明文。
+- 管理控制台的角色切换仅用于开发和演示，不构成生产 RBAC。
