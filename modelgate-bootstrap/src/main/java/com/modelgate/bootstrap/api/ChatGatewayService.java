@@ -150,7 +150,14 @@ public class ChatGatewayService {
             reserveIdempotency(apiKey, idempotencyKey);
             int inputTokens = tokenEstimator.estimateInputTokens(request);
             int maxOutputTokens = tokenEstimator.maxOutputTokens(request);
-            QuotaReservation reservation = quotaService.reserve(apiKey, request.model(), requestId, inputTokens, maxOutputTokens);
+            QuotaReservation reservation;
+            try {
+                reservation = quotaService.reserve(apiKey, request.model(), requestId, inputTokens, maxOutputTokens);
+            } catch (ModelGateException ex) {
+                requestRepository.insertRejected(requestId, apiKey, request.model(), request.streamEnabled(), inputTokens,
+                        Math.addExact(inputTokens, maxOutputTokens), ex.errorCode().name(), ex.limitDimension());
+                throw ex;
+            }
             RouteTarget target;
             try {
                 target = routeRepository.findFirstTarget(request.model())

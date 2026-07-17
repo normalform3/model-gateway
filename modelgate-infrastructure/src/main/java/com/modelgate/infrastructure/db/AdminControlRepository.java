@@ -3,6 +3,11 @@ package com.modelgate.infrastructure.db;
 import com.modelgate.common.api.AdminDtos.DeploymentItem;
 import com.modelgate.common.api.AdminDtos.DeploymentListResponse;
 import com.modelgate.common.api.AdminDtos.DashboardOverview;
+import com.modelgate.common.api.AdminDtos.BillingCurrencyAmount;
+import com.modelgate.common.api.AdminDtos.GatewayPressure;
+import com.modelgate.common.api.AdminDtos.GatewayProtectionOverview;
+import com.modelgate.common.api.AdminDtos.GatewayProtectionTrend;
+import com.modelgate.common.api.AdminDtos.LimitDimensionCount;
 import com.modelgate.common.api.AdminDtos.LogicalModelItem;
 import com.modelgate.common.api.AdminDtos.LogicalModelListResponse;
 import com.modelgate.common.api.AdminDtos.ProviderListResponse;
@@ -22,7 +27,9 @@ import com.modelgate.common.error.ErrorCode;
 import com.modelgate.common.error.ModelGateException;
 import com.modelgate.common.domain.GlobalRuntimePolicy;
 import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,9 +43,17 @@ import java.util.Set;
 @Repository
 public class AdminControlRepository {
     private final JdbcTemplate jdbcTemplate;
+    private final StringRedisTemplate redisTemplate;
 
-    public AdminControlRepository(JdbcTemplate jdbcTemplate) {
+    @Autowired
+    public AdminControlRepository(JdbcTemplate jdbcTemplate, StringRedisTemplate redisTemplate) {
         this.jdbcTemplate = jdbcTemplate;
+        this.redisTemplate = redisTemplate;
+    }
+
+    /** Kept for repository-focused tests that do not exercise Redis-backed dashboards. */
+    public AdminControlRepository(JdbcTemplate jdbcTemplate) {
+        this(jdbcTemplate, null);
     }
 
     public ProviderListResponse listProviders(String keyword, String providerType, Boolean enabled, int page, int size) {
@@ -228,11 +243,52 @@ public class AdminControlRepository {
         long requests = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)");
         long successes = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND status = 'SUCCESS'");
         long throttled = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND error_code IN ('RATE_LIMIT_EXCEEDED', 'CONCURRENCY_LIMIT_EXCEEDED')");
+        long failed = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND status = 'FAILED' AND (error_code IS NULL OR error_code NOT IN ('RATE_LIMIT_EXCEEDED', 'CONCURRENCY_LIMIT_EXCEEDED'))");
         long frozen = longCount("SELECT COALESCE(SUM(frozen_tokens), 0) FROM quota_account");
         BigDecimal amount = jdbcTemplate.queryForObject("SELECT COALESCE(SUM(amount), 0) FROM billing_record WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)", BigDecimal.class);
+        List<BillingCurrencyAmount> amounts = jdbcTemplate.query("SELECT currency, COALESCE(SUM(amount), 0) amount FROM billing_record WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) GROUP BY currency ORDER BY currency",
+                (rs, row) -> new BillingCurrencyAmount(rs.getString("currency"), rs.getBigDecimal("amount")));
         Integer rpm = jdbcTemplate.queryForObject("SELECT global_rpm FROM global_runtime_policy WHERE id = 1", Integer.class);
         Integer concurrency = jdbcTemplate.queryForObject("SELECT global_concurrency FROM global_runtime_policy WHERE id = 1", Integer.class);
-        return new DashboardOverview(providers, teams, keys, requests, successes, throttled, frozen, amount, "USD", rpm, concurrency);
+        return new DashboardOverview(providers, teams, keys, requests, successes, throttled, failed, frozen, amount, "USD", amounts, rpm, concurrency);
+    }
+
+    public GatewayProtectionOverview gatewayProtection(String requestedRange) {
+        if (redisTemplate == null) throw new IllegalStateException("Redis is required for gateway protection observability.");
+        String range = normalizeRange(requestedRange);
+        String since = "24h".equals(range) ? "DATE_SUB(NOW(), INTERVAL 24 HOUR)" : "DATE_SUB(NOW(), INTERVAL 7 DAY)";
+        String bucket = "24h".equals(range) ? "DATE_FORMAT(created_at, '%Y-%m-%d %H:00')" : "DATE_FORMAT(created_at, '%Y-%m-%d')";
+        GlobalRuntimePolicy policy = globalRuntimePolicy();
+        long now = System.currentTimeMillis();
+        redisTemplate.opsForZSet().removeRangeByScore("rate:global:rpm", 0, now - 60_000L);
+        redisTemplate.opsForZSet().removeRangeByScore("concurrency:global", 0, now);
+        Long rpm = redisTemplate.opsForZSet().zCard("rate:global:rpm");
+        Long concurrency = redisTemplate.opsForZSet().zCard("concurrency:global");
+        long requests = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= " + since);
+        long successes = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= " + since + " AND status = 'SUCCESS'");
+        long rateLimited = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= " + since + " AND error_code = 'RATE_LIMIT_EXCEEDED'");
+        long concurrencyLimited = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= " + since + " AND error_code = 'CONCURRENCY_LIMIT_EXCEEDED'");
+        long otherFailures = longCount("SELECT COUNT(*) FROM ai_request WHERE created_at >= " + since + " AND status = 'FAILED' AND (error_code IS NULL OR error_code NOT IN ('RATE_LIMIT_EXCEEDED', 'CONCURRENCY_LIMIT_EXCEEDED'))");
+        List<GatewayProtectionTrend> trends = jdbcTemplate.query("""
+                SELECT %s bucket, COUNT(*) requests,
+                       SUM(status = 'SUCCESS') successes,
+                       SUM(error_code = 'RATE_LIMIT_EXCEEDED') rate_limited,
+                       SUM(error_code = 'CONCURRENCY_LIMIT_EXCEEDED') concurrency_limited,
+                       SUM(status = 'FAILED' AND (error_code IS NULL OR error_code NOT IN ('RATE_LIMIT_EXCEEDED', 'CONCURRENCY_LIMIT_EXCEEDED'))) other_failures
+                FROM ai_request WHERE created_at >= %s
+                GROUP BY %s ORDER BY MIN(created_at)
+                """.formatted(bucket, since, bucket), (rs, row) -> new GatewayProtectionTrend(
+                rs.getString("bucket"), rs.getLong("requests"), rs.getLong("successes"), rs.getLong("rate_limited"),
+                rs.getLong("concurrency_limited"), rs.getLong("other_failures")));
+        List<LimitDimensionCount> dimensions = jdbcTemplate.query("""
+                SELECT COALESCE(limit_dimension, 'HISTORICAL_UNSPECIFIED') dimension, COUNT(*) count
+                FROM ai_request WHERE created_at >= %s
+                  AND error_code IN ('RATE_LIMIT_EXCEEDED', 'CONCURRENCY_LIMIT_EXCEEDED')
+                GROUP BY COALESCE(limit_dimension, 'HISTORICAL_UNSPECIFIED') ORDER BY count DESC, dimension
+                """.formatted(since), (rs, row) -> new LimitDimensionCount(rs.getString("dimension"), rs.getLong("count")));
+        return new GatewayProtectionOverview(range, OffsetDateTime.now(), new GatewayPressure(rpm == null ? 0 : rpm, policy.globalRpm()),
+                new GatewayPressure(concurrency == null ? 0 : concurrency, policy.globalConcurrency()), requests, successes, rateLimited,
+                concurrencyLimited, otherFailures, trends, dimensions);
     }
 
     public DashboardOverview updateGlobalPolicy(UpdateGlobalRuntimePolicyRequest request) {
@@ -245,6 +301,12 @@ public class AdminControlRepository {
         Integer rpm = jdbcTemplate.queryForObject("SELECT global_rpm FROM global_runtime_policy WHERE id = 1", Integer.class);
         Integer concurrency = jdbcTemplate.queryForObject("SELECT global_concurrency FROM global_runtime_policy WHERE id = 1", Integer.class);
         return new GlobalRuntimePolicy(rpm == null ? 10000 : rpm, concurrency == null ? 1000 : concurrency);
+    }
+
+    private static String normalizeRange(String value) {
+        String normalized = value == null || value.isBlank() ? "24h" : value.trim().toLowerCase();
+        if (!"24h".equals(normalized) && !"7d".equals(normalized)) throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST, "range must be 24h or 7d.");
+        return normalized;
     }
 
     private ProviderSummary findProvider(long providerId) {

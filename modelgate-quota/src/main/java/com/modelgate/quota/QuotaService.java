@@ -26,7 +26,7 @@ public class QuotaService {
     private static final String RESERVE_SCRIPT = """
             local now = tonumber(ARGV[1])
             local window_start = now - tonumber(ARGV[2])
-            local request_id = ARGV[10]
+            local request_id = ARGV[11]
             redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, window_start)
             redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, window_start)
             local expired_tpm = redis.call('ZRANGEBYSCORE', KEYS[3], 0, window_start)
@@ -35,33 +35,36 @@ public class QuotaService {
                 redis.call('DECRBY', KEYS[4], tokens)
             end
             redis.call('ZREMRANGEBYSCORE', KEYS[3], 0, window_start)
-            redis.call('ZREMRANGEBYSCORE', KEYS[5], 0, now)
+            redis.call('ZREMRANGEBYSCORE', KEYS[5], 0, window_start)
             redis.call('ZREMRANGEBYSCORE', KEYS[6], 0, now)
             redis.call('ZREMRANGEBYSCORE', KEYS[7], 0, now)
             redis.call('ZREMRANGEBYSCORE', KEYS[8], 0, now)
-            if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 'RATE_LIMIT_EXCEEDED' end
-            if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return 'RATE_LIMIT_EXCEEDED' end
-            local estimated = tonumber(ARGV[13])
-            if tonumber(redis.call('GET', KEYS[4]) or '0') + estimated > tonumber(ARGV[5]) then return 'RATE_LIMIT_EXCEEDED' end
-            if redis.call('ZCARD', KEYS[5]) >= tonumber(ARGV[6]) then return 'CONCURRENCY_LIMIT_EXCEEDED' end
-            if redis.call('ZCARD', KEYS[6]) >= tonumber(ARGV[7]) then return 'CONCURRENCY_LIMIT_EXCEEDED' end
-            if redis.call('ZCARD', KEYS[7]) >= tonumber(ARGV[8]) then return 'CONCURRENCY_LIMIT_EXCEEDED' end
-            if redis.call('ZCARD', KEYS[8]) >= tonumber(ARGV[9]) then return 'CONCURRENCY_LIMIT_EXCEEDED' end
-            if ARGV[14] == '1' and tonumber(redis.call('HGET', KEYS[9], 'available_tokens') or '-1') < estimated then return 'QUOTA_INSUFFICIENT' end
+            redis.call('ZREMRANGEBYSCORE', KEYS[9], 0, now)
+            if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 'RATE_LIMIT_EXCEEDED|KEY_RPM' end
+            if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return 'RATE_LIMIT_EXCEEDED|TEAM_RPM' end
+            local estimated = tonumber(ARGV[14])
+            if tonumber(redis.call('GET', KEYS[4]) or '0') + estimated > tonumber(ARGV[5]) then return 'RATE_LIMIT_EXCEEDED|TEAM_TPM' end
+            if redis.call('ZCARD', KEYS[5]) >= tonumber(ARGV[6]) then return 'RATE_LIMIT_EXCEEDED|GLOBAL_RPM' end
+            if redis.call('ZCARD', KEYS[6]) >= tonumber(ARGV[7]) then return 'CONCURRENCY_LIMIT_EXCEEDED|KEY_CONCURRENCY' end
+            if redis.call('ZCARD', KEYS[7]) >= tonumber(ARGV[8]) then return 'CONCURRENCY_LIMIT_EXCEEDED|TEAM_CONCURRENCY' end
+            if redis.call('ZCARD', KEYS[8]) >= tonumber(ARGV[9]) then return 'CONCURRENCY_LIMIT_EXCEEDED|MODEL_CONCURRENCY' end
+            if redis.call('ZCARD', KEYS[9]) >= tonumber(ARGV[10]) then return 'CONCURRENCY_LIMIT_EXCEEDED|GLOBAL_CONCURRENCY' end
             if ARGV[15] == '1' and tonumber(redis.call('HGET', KEYS[10], 'available_tokens') or '-1') < estimated then return 'QUOTA_INSUFFICIENT' end
-            local expire_at = tonumber(ARGV[11])
-            local ttl = tonumber(ARGV[12])
+            if ARGV[16] == '1' and tonumber(redis.call('HGET', KEYS[11], 'available_tokens') or '-1') < estimated then return 'QUOTA_INSUFFICIENT' end
+            local expire_at = tonumber(ARGV[12])
+            local ttl = tonumber(ARGV[13])
             redis.call('ZADD', KEYS[1], now, request_id .. ':key')
             redis.call('ZADD', KEYS[2], now, request_id .. ':team')
             redis.call('ZADD', KEYS[3], now, request_id .. '|' .. estimated)
             redis.call('INCRBY', KEYS[4], estimated)
-            redis.call('ZADD', KEYS[5], expire_at, request_id .. ':key')
-            redis.call('ZADD', KEYS[6], expire_at, request_id .. ':team')
-            redis.call('ZADD', KEYS[7], expire_at, request_id .. ':model')
-            redis.call('ZADD', KEYS[8], expire_at, request_id .. ':global')
-            for i = 1, 8 do redis.call('EXPIRE', KEYS[i], ttl) end
-            if ARGV[14] == '1' then redis.call('HINCRBY', KEYS[9], 'available_tokens', -estimated); redis.call('HINCRBY', KEYS[9], 'frozen_tokens', estimated) end
+            redis.call('ZADD', KEYS[5], now, request_id .. ':global-rpm')
+            redis.call('ZADD', KEYS[6], expire_at, request_id .. ':key')
+            redis.call('ZADD', KEYS[7], expire_at, request_id .. ':team')
+            redis.call('ZADD', KEYS[8], expire_at, request_id .. ':model')
+            redis.call('ZADD', KEYS[9], expire_at, request_id .. ':global')
+            for i = 1, 9 do redis.call('EXPIRE', KEYS[i], ttl) end
             if ARGV[15] == '1' then redis.call('HINCRBY', KEYS[10], 'available_tokens', -estimated); redis.call('HINCRBY', KEYS[10], 'frozen_tokens', estimated) end
+            if ARGV[16] == '1' then redis.call('HINCRBY', KEYS[11], 'available_tokens', -estimated); redis.call('HINCRBY', KEYS[11], 'frozen_tokens', estimated) end
             return 'OK'
             """;
     private static final String SETTLE_SCRIPT = """
@@ -109,12 +112,16 @@ public class QuotaService {
         GlobalRuntimePolicy global = globalPolicy();
         String result = redis.execute(new DefaultRedisScript<>(RESERVE_SCRIPT, String.class), List.of(
                         "rate:key:" + context.keyId() + ":rpm", "rate:team:" + context.teamId() + ":rpm", "rate:team:" + context.teamId() + ":tpm", "rate:team:" + context.teamId() + ":tpm:total",
-                        "concurrency:key:" + context.keyId(), "concurrency:team:" + context.teamId(), "concurrency:model:" + logicalModel, "concurrency:global",
+                        "rate:global:rpm", "concurrency:key:" + context.keyId(), "concurrency:team:" + context.teamId(), "concurrency:model:" + logicalModel, "concurrency:global",
                         quotaKey(member, cycle, pool), quotaKey(team, cycle, pool)),
-                Long.toString(now), "60000", Integer.toString(context.rateLimitPolicy().keyRpm()), Integer.toString(context.rateLimitPolicy().teamRpm()), Integer.toString(context.rateLimitPolicy().teamTpm()),
+                Long.toString(now), "60000", Integer.toString(context.rateLimitPolicy().keyRpm()), Integer.toString(context.rateLimitPolicy().teamRpm()), Integer.toString(context.rateLimitPolicy().teamTpm()), Integer.toString(global.globalRpm()),
                 Integer.toString(context.rateLimitPolicy().keyConcurrency()), Integer.toString(context.rateLimitPolicy().teamConcurrency()), Integer.toString(context.rateLimitPolicy().modelConcurrency()), Integer.toString(global.globalConcurrency()), requestId,
                 Long.toString(expires), Long.toString(requestTtlSeconds + 60), Integer.toString(estimated), member.limited() ? "1" : "0", team.limited() ? "1" : "0");
-        if (!"OK".equals(result)) { ErrorCode code = ErrorCode.valueOf(result == null ? ErrorCode.INTERNAL_ERROR.name() : result); throw new ModelGateException(code, code.defaultMessage(), requestId); }
+        if (!"OK".equals(result)) {
+            String[] parts = (result == null ? ErrorCode.INTERNAL_ERROR.name() : result).split("\\|", 2);
+            ErrorCode code = ErrorCode.valueOf(parts[0]);
+            throw new ModelGateException(code, code.defaultMessage(), requestId, parts.length == 2 ? parts[1] : null);
+        }
         return new QuotaReservation(requestId, estimated, inputTokens, member, team, cycle);
     }
 

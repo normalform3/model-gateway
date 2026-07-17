@@ -94,6 +94,11 @@ public class AdminController {
         return Mono.fromCallable(adminRepository::bootstrapDemo).subscribeOn(Schedulers.boundedElastic());
     }
 
+    @PostMapping("/bootstrap/showcase")
+    public Mono<ShowcaseBootstrapResponse> bootstrapShowcase() {
+        return Mono.fromCallable(adminRepository::bootstrapShowcase).subscribeOn(Schedulers.boundedElastic());
+    }
+
     @GetMapping("/demo-identities")
     public Mono<DemoIdentityResponse> demoIdentities() {
         return Mono.fromCallable(adminRepository::demoIdentities).subscribeOn(Schedulers.boundedElastic());
@@ -508,8 +513,8 @@ public class AdminController {
     }
 
     @GetMapping("/dashboard/quota-summary")
-    public Mono<QuotaSummary> quotaSummary() {
-        return Mono.fromCallable(modelEntitlementRepository::platformQuotaSummary).subscribeOn(Schedulers.boundedElastic());
+    public Mono<QuotaSummary> quotaSummary(@org.springframework.web.bind.annotation.RequestParam(name = "poolType", required = false) String poolType) {
+        return Mono.fromCallable(() -> modelEntitlementRepository.platformQuotaSummary(poolType)).subscribeOn(Schedulers.boundedElastic());
     }
 
     private static ModelQuotaPolicy policy(ModelEntitlementItem item) {
@@ -708,6 +713,11 @@ public class AdminController {
     @GetMapping("/dashboard/overview")
     public Mono<DashboardOverview> dashboard() {
         return Mono.fromCallable(adminControlRepository::dashboard).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @GetMapping("/dashboard/gateway-protection")
+    public Mono<GatewayProtectionOverview> gatewayProtection(@org.springframework.web.bind.annotation.RequestParam(name = "range", required = false) String range) {
+        return Mono.fromCallable(() -> adminControlRepository.gatewayProtection(range)).subscribeOn(Schedulers.boundedElastic());
     }
 
     @PatchMapping("/dashboard/runtime-policy")

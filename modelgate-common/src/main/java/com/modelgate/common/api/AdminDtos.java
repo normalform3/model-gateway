@@ -20,6 +20,18 @@ public final class AdminDtos {
     ) {
     }
 
+    public record ShowcaseBootstrapResponse(
+            long organizationId,
+            List<ShowcaseTeam> teams,
+            int memberCount,
+            int successfulRequestCount,
+            int rejectedRequestCount
+    ) {
+    }
+
+    public record ShowcaseTeam(long teamId, String name, int memberCount) {
+    }
+
     public record DemoIdentity(
             String identityId,
             String displayName,
@@ -541,12 +553,26 @@ public final class AdminDtos {
     ) { }
 
     public record QuotaSummary(
+            String poolType,
             long allocatedTokens,
             long consumedTokens,
             long frozenTokens,
             long remainingTokens,
             int unlimitedEntitlementCount,
-            List<QuotaSummaryItem> items
+            List<QuotaSummaryItem> items,
+            List<QuotaAlertItem> alerts
+    ) { }
+
+    public record QuotaAlertItem(
+            long grantId,
+            long teamId,
+            String teamName,
+            String modelName,
+            String quotaMode,
+            long quotaLimit,
+            long remainingTokens,
+            int alertRemainingPercent,
+            OffsetDateTime createdAt
     ) { }
 
     public record VirtualApiKeyItem(
@@ -574,13 +600,42 @@ public final class AdminDtos {
             long requestsLast24Hours,
             long successfulRequestsLast24Hours,
             long throttledRequestsLast24Hours,
+            long failedRequestsLast24Hours,
             long frozenTokens,
             BigDecimal billingAmountLast24Hours,
             String billingCurrency,
+            List<BillingCurrencyAmount> billingAmountsLast24Hours,
             int globalRpm,
             int globalConcurrency
     ) {
     }
+
+    public record GatewayPressure(long current, int limit) { }
+
+    public record GatewayProtectionTrend(
+            String bucket,
+            long requests,
+            long successes,
+            long rateLimited,
+            long concurrencyLimited,
+            long otherFailures
+    ) { }
+
+    public record LimitDimensionCount(String dimension, long count) { }
+
+    public record GatewayProtectionOverview(
+            String range,
+            OffsetDateTime generatedAt,
+            GatewayPressure rpm,
+            GatewayPressure concurrency,
+            long requests,
+            long successes,
+            long rateLimited,
+            long concurrencyLimited,
+            long otherFailures,
+            List<GatewayProtectionTrend> trends,
+            List<LimitDimensionCount> limitDimensions
+    ) { }
 
     public record UpdateGlobalRuntimePolicyRequest(Integer globalRpm, Integer globalConcurrency) {
     }

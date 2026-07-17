@@ -63,8 +63,10 @@ Redis Key 示例：
 rate:key:{keyId}:rpm
 rate:team:{teamId}:rpm
 rate:team:{teamId}:tpm
+rate:global:rpm
 concurrency:key:{keyId}
 concurrency:model:{logicalModel}
+concurrency:global
 ```
 
 多维限流必须通过 Lua 一次完成检查和扣减，避免出现某一维扣减成功、另一维失败后无法回滚。

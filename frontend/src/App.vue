@@ -86,7 +86,7 @@ onMounted(loadUsers);
       <div class="rail-footer"><span>当前操作上下文</span><strong>{{ roleView === 'platform-admin' ? '平台管理员视角' : currentUser?.name ?? '请选择用户' }}</strong><small>{{ currentUser?.teamName ?? '平台全局视角' }}</small><small>选择仅控制页面与接口筛选，不是登录或 RBAC。</small><small v-if="loadError">{{ loadError }}</small></div>
     </aside>
     <section class="workspace">
-      <AdminDashboardPage v-if="page === 'dashboard' && roleView === 'platform-admin'" />
+      <AdminDashboardPage v-if="page === 'dashboard' && roleView === 'platform-admin'" @open-billing="page = 'billing'" />
       <BillingPage v-else-if="page === 'billing' && roleView === 'platform-admin'" />
       <DeveloperDashboardPage v-else-if="page === 'dashboard'" :member-id="currentUser?.memberId" />
       <UsersPage v-else-if="page === 'users'" />

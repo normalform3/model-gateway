@@ -98,8 +98,9 @@ MVP 控制面接口可以先面向内部管理后台，不要求完全公开。
 - `GET/POST/PATCH/DELETE /admin/models` 管理全局唯一的真实模型名和计费单价。
 - `GET /admin/api-keys` 仅返回系统签发的 Key 前缀、成员归属、有效模型与状态；控制台不提供手工创建 Key。
 - `POST /admin/entitlement-requests/{requestId}/review` 审批负责人提交的团队模型和 Token 申请；无负责人团队不能审批或直接获授资源。
-- `GET /admin/dashboard/overview` 与 `PATCH /admin/dashboard/runtime-policy` 提供全网关概览及全局 RPM/并发保护配置，不按单个团队过滤。
-- `GET /admin/dashboard/quota-summary` 返回所有启用团队的当前周期有限额度汇总；成员二次分配不参与平台汇总，避免与团队上限重复计算。
+- `GET /admin/dashboard/overview` 与 `PATCH /admin/dashboard/runtime-policy` 提供全网关概览及全局 RPM/并发保护配置，不按单个团队过滤。概览包含按币种的近 24 小时成本、非保护失败数；保留旧的单币种金额字段以兼容既有客户端。
+- `GET /admin/dashboard/quota-summary?poolType=DEVELOPMENT|APPLICATION` 返回所有启用团队的当前周期有限额度汇总和最近阈值预警。默认 `DEVELOPMENT`；成员或项目的二次分配不参与平台汇总，避免与团队上限重复计算。
+- `GET /admin/dashboard/gateway-protection?range=24h|7d` 返回全局 RPM/并发的 Redis 实时压力、请求与拒绝趋势和保护命中维度。`24h` 按小时聚合，`7d` 按 Asia/Shanghai 自然日聚合。
 
 列表接口统一支持 `page`（从 0 开始）和 `size`（最大 100），响应返回 `items`、`page`、`size`、`total`。额外筛选条件：
 
@@ -110,6 +111,8 @@ MVP 控制面接口可以先面向内部管理后台，不要求完全公开。
 ### 用户与开发期视角
 
 `POST /admin/bootstrap/demo` 会幂等创建 Demo Team、`Demo Owner` 和 `Demo Developer`，不创建密码、会话或预置明文 API Key。
+
+`POST /admin/bootstrap/showcase` 用于本地或受控演示：它在独立的 `Showcase Organization` 下幂等创建 3 个团队、16 名成员、Mock 模型、成员与项目额度、近 7 天的用量/账单事实，以及少量限流和并发拒绝记录。响应只返回组织、团队、成员数与成功/拒绝请求数，不返回明文 Key 或 Provider 凭据。展示请求、用量与账单使用固定标识重复写入，不会重复累计；该接口不会写入 Outbox 或投递 RocketMQ 事件。
 
 `GET/POST /admin/users`、`PATCH/DELETE /admin/users/{userId}` 管理全局用户。删除用户会在同一事务中清理其成员关系、虚拟 Key、用量、账单和额度数据；用户最多属于一个**活动**团队，已停用的成员关系保留为历史并可重新加入其他团队。`POST /admin/teams/{teamId}/dissolve` 是控制台使用的团队终态操作：它将团队标为 `DISSOLVED` 并停用团队、成员和 Key，同时保留平台用户、调用、用量、账单、权益与额度流水，且不能通过常规更新接口恢复。现有 `DELETE /admin/teams/{teamId}` 仍是物理清理接口，不在控制台暴露。管理员设置团队负责人时只能选择启用、未归属其他活动团队的现有用户。
 
@@ -417,4 +420,6 @@ MVP 错误码：
 | `PROVIDER_TIMEOUT` | 504 | true | Provider 调用超时 |
 | `PROVIDER_UNAVAILABLE` | 503 | true | Provider 临时不可用 |
 | `BAD_MODEL_REQUEST` | 400 | false | 请求参数无效 |
+
+限流和并发拒绝仍返回上述稳定错误码；管理端请求事实额外记录内部命中维度（例如 `GLOBAL_RPM`、`TEAM_TPM`、`MODEL_CONCURRENCY`），不会暴露给模型调用方。
 | `INTERNAL_ERROR` | 500 | true | 未分类内部错误 |

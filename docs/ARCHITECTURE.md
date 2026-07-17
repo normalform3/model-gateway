@@ -130,7 +130,7 @@ modelgate-common
 2. 网关计算 requestId 和幂等上下文
 3. 鉴权模块读取 ApiKeyContext
 4. 权限模块校验成员权限与团队授权的交集
-5. 限流模块通过一次 Redis Lua 执行 Key/团队 RPM、团队 TPM、Key/团队/逻辑模型并发校验
+5. 限流模块通过一次 Redis Lua 执行全局/Key/团队 RPM、团队 TPM、Key/团队/逻辑模型/全局并发校验
 6. 额度模块估算 Token，并原子冻结团队与成员（或应用）的同模型周期额度
 7. 解析直接模型并从 Provider 凭据池轮询选择凭据
 8. Provider Adapter 转发请求；首包前可切换一把备用凭据

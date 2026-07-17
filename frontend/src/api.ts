@@ -61,8 +61,13 @@ export interface UsageTrend { day: string; tokens: number; amount: number; reque
 export interface MemberUsageRank { memberId: number; memberName: string; tokens: number; amount: number }
 export interface UsageDashboard { scopeId: number; modelEntitlements: ModelEntitlement[]; lastSevenDays: UsageTrend[]; memberRanking: MemberUsageRank[] }
 export interface QuotaSummaryItem { modelName: string; quotaMode: QuotaMode; teamCount: number; allocatedTokens: number; consumedTokens: number; frozenTokens: number; remainingTokens: number }
-export interface QuotaSummary { allocatedTokens: number; consumedTokens: number; frozenTokens: number; remainingTokens: number; unlimitedEntitlementCount: number; items: QuotaSummaryItem[] }
-export interface DashboardOverview { enabledProviderCount: number; enabledTeamCount: number; enabledKeyCount: number; requestsLast24Hours: number; successfulRequestsLast24Hours: number; throttledRequestsLast24Hours: number; frozenTokens: number; billingAmountLast24Hours: number; billingCurrency: string; globalRpm: number; globalConcurrency: number }
+export interface QuotaAlert { grantId: number; teamId: number; teamName: string; modelName: string; quotaMode: QuotaMode; quotaLimit: number; remainingTokens: number; alertRemainingPercent: number; createdAt: string }
+export interface QuotaSummary { poolType: "DEVELOPMENT" | "APPLICATION"; allocatedTokens: number; consumedTokens: number; frozenTokens: number; remainingTokens: number; unlimitedEntitlementCount: number; items: QuotaSummaryItem[]; alerts: QuotaAlert[] }
+export interface DashboardOverview { enabledProviderCount: number; enabledTeamCount: number; enabledKeyCount: number; requestsLast24Hours: number; successfulRequestsLast24Hours: number; throttledRequestsLast24Hours: number; failedRequestsLast24Hours: number; frozenTokens: number; billingAmountLast24Hours: number; billingCurrency: string; billingAmountsLast24Hours: BillingCurrencyAmount[]; globalRpm: number; globalConcurrency: number }
+export interface GatewayPressure { current: number; limit: number }
+export interface GatewayProtectionTrend { bucket: string; requests: number; successes: number; rateLimited: number; concurrencyLimited: number; otherFailures: number }
+export interface LimitDimensionCount { dimension: string; count: number }
+export interface GatewayProtectionOverview { range: "24h" | "7d"; generatedAt: string; rpm: GatewayPressure; concurrency: GatewayPressure; requests: number; successes: number; rateLimited: number; concurrencyLimited: number; otherFailures: number; trends: GatewayProtectionTrend[]; limitDimensions: LimitDimensionCount[] }
 export interface PageResult<T> { items: T[]; page: number; size: number; total: number }
 export type Query = Record<string, string | number | boolean | null | undefined>;
 function withQuery(path: string, query: Query = {}): string { const params = new URLSearchParams(); Object.entries(query).forEach(([key, value]) => { if (value !== null && value !== undefined && value !== "") params.set(key, String(value)); }); const encoded = params.toString(); return encoded ? `${path}?${encoded}` : path; }
@@ -143,9 +148,10 @@ export const api = {
   revokeMemberModelEntitlement: (teamId: number, memberId: number, model: string, ownerMemberId: number) => requestJson<void>(withQuery(`/admin/teams/${teamId}/members/${memberId}/model-entitlements/${encodeURIComponent(model)}`, { ownerMemberId }), { method: "DELETE" }),
   teamUsageDashboard: (teamId: number) => requestJson<UsageDashboard>(`/admin/teams/${teamId}/usage-dashboard`),
   memberUsageDashboard: (memberId: number) => requestJson<UsageDashboard>(`/admin/members/${memberId}/usage-dashboard`),
-  quotaSummary: () => requestJson<QuotaSummary>("/admin/dashboard/quota-summary"),
+  quotaSummary: (poolType: "DEVELOPMENT" | "APPLICATION" = "DEVELOPMENT") => requestJson<QuotaSummary>(withQuery("/admin/dashboard/quota-summary", { poolType })),
   keys: (query?: Query) => requestJson<PageResult<VirtualApiKeyItem>>(withQuery("/admin/api-keys", query)),
   disableKey: (keyId: number) => requestJson(`/admin/api-keys/${keyId}/disable`, { method: "POST" }),
   dashboard: () => requestJson<DashboardOverview>("/admin/dashboard/overview"),
+  gatewayProtection: (range: "24h" | "7d" = "24h") => requestJson<GatewayProtectionOverview>(withQuery("/admin/dashboard/gateway-protection", { range })),
   updateRuntimePolicy: (payload: Record<string, unknown>) => requestJson<DashboardOverview>("/admin/dashboard/runtime-policy", { method: "PATCH", body: JSON.stringify(payload) })
 };

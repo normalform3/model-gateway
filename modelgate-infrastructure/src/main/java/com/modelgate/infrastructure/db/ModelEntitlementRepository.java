@@ -119,16 +119,19 @@ public class ModelEntitlementRepository {
         return new UsageDashboard(memberId, list("team_id = ? AND member_id = ? AND pool_type = 'DEVELOPMENT'", teamId, memberId), trends("u.member_id = ? AND u.credential_type = 'DEVELOPER'", memberId), List.of());
     }
 
-    /** Platform-wide view of active team grants. Member grants are derived allocations and must not be counted twice. */
-    public QuotaSummary platformQuotaSummary() {
+    /** Platform-wide view of active team grants. Member and project grants are derived allocations and must not be counted twice. */
+    public QuotaSummary platformQuotaSummary() { return platformQuotaSummary("DEVELOPMENT"); }
+
+    public QuotaSummary platformQuotaSummary(String requestedPoolType) {
+        String poolType = poolType(requestedPoolType);
         List<ModelEntitlementItem> grants = jdbc.query("""
                 SELECT meg.id, meg.team_id, meg.member_id, meg.model_name, meg.quota_mode, meg.quota_limit, meg.alert_remaining_percent,
                        meg.status, meg.reason, meg.created_at, meg.revoked_at
                 FROM model_entitlement_grant meg
                 JOIN team t ON t.id = meg.team_id
-                WHERE meg.member_id IS NULL AND meg.project_id IS NULL AND meg.pool_type = 'DEVELOPMENT' AND meg.status = 'ACTIVE' AND t.enabled = 1
+                WHERE meg.member_id IS NULL AND meg.project_id IS NULL AND meg.pool_type = ? AND meg.status = 'ACTIVE' AND t.enabled = 1
                 ORDER BY meg.model_name, meg.quota_mode, meg.team_id
-                """, (rs, row) -> itemFromRow(rs));
+                """, (rs, row) -> itemFromRow(rs), poolType);
         Map<String, QuotaSummaryAccumulator> grouped = new LinkedHashMap<>();
         int unlimited = 0;
         for (ModelEntitlementItem grant : grants) {
@@ -142,7 +145,24 @@ public class ModelEntitlementRepository {
         long consumed = items.stream().mapToLong(QuotaSummaryItem::consumedTokens).sum();
         long frozen = items.stream().mapToLong(QuotaSummaryItem::frozenTokens).sum();
         long remaining = items.stream().mapToLong(QuotaSummaryItem::remainingTokens).sum();
-        return new QuotaSummary(allocated, consumed, frozen, remaining, unlimited, items);
+        return new QuotaSummary(poolType, allocated, consumed, frozen, remaining, unlimited, items, alerts(poolType));
+    }
+
+    private List<QuotaAlertItem> alerts(String poolType) {
+        return jdbc.query("""
+                SELECT ba.grant_id, meg.team_id, t.name team_name, meg.model_name, meg.quota_mode, meg.quota_limit,
+                       ba.remaining_tokens, ba.alert_remaining_percent, ba.created_at
+                FROM budget_alert ba
+                JOIN model_entitlement_grant meg ON meg.id = ba.grant_id
+                JOIN team t ON t.id = meg.team_id
+                WHERE meg.member_id IS NULL AND meg.project_id IS NULL AND meg.pool_type = ?
+                  AND meg.status = 'ACTIVE' AND t.enabled = 1
+                ORDER BY ba.created_at DESC
+                LIMIT 20
+                """, (rs, row) -> new QuotaAlertItem(
+                rs.getLong("grant_id"), rs.getLong("team_id"), rs.getString("team_name"), rs.getString("model_name"),
+                rs.getString("quota_mode"), rs.getLong("quota_limit"), rs.getLong("remaining_tokens"),
+                rs.getInt("alert_remaining_percent"), JdbcTime.toOffsetDateTime(rs.getTimestamp("created_at"))), poolType);
     }
 
     public static String cycleStart(QuotaMode mode) {
@@ -216,6 +236,11 @@ public class ModelEntitlementRepository {
     private void requireMember(long team, long member) { Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM team_member WHERE team_id=? AND id=? AND enabled=1", Integer.class, team, member); if (count == null || count == 0) throw bad("Member was not found."); }
     private void requireEnabledModel(String model) { Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM provider_model WHERE model_name=? AND enabled=1", Integer.class, model); if (count == null || count == 0) throw bad("Model was not found or disabled: " + model); }
     private static QuotaMode mode(String raw) { try { return QuotaMode.valueOf(raw == null ? "" : raw.trim().toUpperCase()); } catch (IllegalArgumentException ex) { throw bad("quotaMode must be DAILY, WEEKLY, or UNLIMITED."); } }
+    private static String poolType(String raw) {
+        String normalized = raw == null || raw.isBlank() ? "DEVELOPMENT" : raw.trim().toUpperCase();
+        if (!"DEVELOPMENT".equals(normalized) && !"APPLICATION".equals(normalized)) throw bad("poolType must be DEVELOPMENT or APPLICATION.");
+        return normalized;
+    }
     private static Long nullableLong(Object value) { return value == null ? null : ((Number) value).longValue(); }
     private static Integer nullableInt(Object value) { return value == null ? null : ((Number) value).intValue(); }
     private static void validateAlertThreshold(Integer value) { if (value != null && (value < 1 || value > 100)) throw bad("alertRemainingPercent must be between 1 and 100."); }

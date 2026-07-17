@@ -118,6 +118,30 @@ class MvpUnitTests {
     }
 
     @Test
+    void showcaseBootstrapBuildsTheThreeTeamDatasetWithStableFacts() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+        AdminRepository repository = new AdminRepository(jdbcTemplate);
+
+        var first = repository.bootstrapShowcase();
+        var second = repository.bootstrapShowcase();
+
+        assertThat(first.organizationId()).isEqualTo(1L);
+        assertThat(first.teams()).extracting(team -> team.name())
+                .containsExactly("Showcase AI Engineering", "Showcase Product Intelligence", "Showcase Customer Experience");
+        assertThat(first.teams()).extracting(team -> team.memberCount()).containsExactly(6, 5, 5);
+        assertThat(first.memberCount()).isEqualTo(16);
+        assertThat(first.successfulRequestCount()).isEqualTo(133);
+        assertThat(first.rejectedRequestCount()).isEqualTo(6);
+        assertThat(java.util.Arrays.stream(first.getClass().getRecordComponents()).map(component -> component.getName()))
+                .doesNotContain("apiKey", "keyHash", "providerCredential");
+        assertThat(second).isEqualTo(first);
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("INSERT INTO ai_request") && call.sql().contains("ON DUPLICATE KEY UPDATE"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("INSERT INTO usage_record") && call.sql().contains("ON DUPLICATE KEY UPDATE"));
+        assertThat(jdbcTemplate.updates).anyMatch(call -> call.sql().contains("INSERT INTO billing_record") && call.sql().contains("ON DUPLICATE KEY UPDATE"));
+        assertThat(jdbcTemplate.updates).noneMatch(call -> call.sql().contains("usage_event_outbox") || call.sql().contains("provider_credential"));
+    }
+
+    @Test
     void deletingUserCascadesMemberDataAndReturnsKeyHashesForInvalidation() {
         RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
         UserRepository repository = new UserRepository(jdbcTemplate);

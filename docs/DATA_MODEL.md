@@ -134,6 +134,7 @@ CREATE TABLE ai_request (
     estimated_tokens INT DEFAULT 0,
     status VARCHAR(32) NOT NULL,
     error_code VARCHAR(64),
+    limit_dimension VARCHAR(32),
     duration_ms BIGINT,
     first_token_ms BIGINT,
     created_at DATETIME NOT NULL,
@@ -142,6 +143,8 @@ CREATE TABLE ai_request (
     KEY idx_team_created(team_id, created_at),
 );
 ```
+
+`limit_dimension` 仅在通过鉴权和模型权限后被 RPM、TPM 或并发保护拒绝时记录，用于管理端观测；历史请求为空。对外 API 仍只返回稳定的 `RATE_LIMIT_EXCEEDED` 或 `CONCURRENCY_LIMIT_EXCEEDED` 错误码。
 
 ## 开发期测试 Key 与运行归因
 

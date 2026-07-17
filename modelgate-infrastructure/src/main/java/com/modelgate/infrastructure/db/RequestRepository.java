@@ -68,4 +68,27 @@ public class RequestRepository {
                 JdbcTime.toTimestamp(OffsetDateTime.now()),
                 requestId);
     }
+
+    /** Records a request rejected before a route/provider is selected, after authentication and model authorization succeeded. */
+    public void insertRejected(
+            String requestId,
+            ApiKeyContext context,
+            String requestedModel,
+            boolean stream,
+            int inputTokens,
+            int estimatedTokens,
+            String errorCode,
+            String limitDimension
+    ) {
+        java.sql.Timestamp now = JdbcTime.toTimestamp(OffsetDateTime.now());
+        jdbcTemplate.update("""
+                        INSERT INTO ai_request(
+                            request_id, organization_id, team_id, api_key_id, member_id, credential_type, project_id, service_account_id,
+                            requested_model, stream_enabled, input_tokens, estimated_tokens, status, error_code, limit_dimension, created_at, completed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                requestId, context.organizationId(), context.teamId(), context.keyId(), context.memberId(), context.credentialType().name(),
+                context.projectId(), context.serviceAccountId(), requestedModel, stream ? 1 : 0, inputTokens, estimatedTokens,
+                RequestStatus.FAILED.name(), errorCode, limitDimension, now, now);
+    }
 }
