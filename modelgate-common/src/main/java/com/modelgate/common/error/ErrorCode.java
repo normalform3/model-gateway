@@ -15,6 +15,10 @@ public enum ErrorCode {
     IDEMPOTENCY_CONFLICT(409, false, "The idempotency key is already used by another request."),
     TEAM_HAS_DEPENDENCIES(409, false, "The team still has dependent resources and cannot be deleted."),
     USER_HAS_DEPENDENCIES(409, false, "The user still has dependent resources and cannot be deleted."),
+    AUTHENTICATION_REQUIRED(401, false, "Authentication is required."),
+    AUTHENTICATION_FAILED(401, false, "Invalid email or password."),
+    ACCESS_DENIED(403, false, "You do not have permission to perform this operation."),
+    PASSWORD_CHANGE_REQUIRED(403, false, "A password change is required before continuing."),
     INTERNAL_ERROR(500, true, "Internal server error.");
 
     private final int httpStatus;

@@ -19,6 +19,12 @@ modelgate:
   auth-cache:
     invalidation-channel: ${MODELGATE_AUTH_CACHE_INVALIDATION_CHANNEL:modelgate:auth-cache:invalidate:v1}
     instance-id: ${MODELGATE_AUTH_CACHE_INSTANCE_ID:}
+  console-auth:
+    jwt-secret: ${MODELGATE_CONSOLE_JWT_SECRET:}
+    bootstrap-admin-password-hash: ${MODELGATE_BOOTSTRAP_ADMIN_PASSWORD_HASH:}
+    development-default-credentials-enabled: ${MODELGATE_DEVELOPMENT_DEFAULT_CREDENTIALS_ENABLED:false}
+    initialize-development-credentials: ${MODELGATE_INITIALIZE_DEVELOPMENT_CREDENTIALS:false}
+    refresh-cookie-secure: ${MODELGATE_CONSOLE_REFRESH_COOKIE_SECURE:false}
   provider:
     master-key: ${MODELGATE_PROVIDER_MASTER_KEY:}
   mock:

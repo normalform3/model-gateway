@@ -107,14 +107,13 @@ function clearDetail() {
 async function loadCatalog(selectFallback = true) {
   catalogLoading.value = true;
   try {
-    const [teamData, modelData, userData] = await Promise.all([
+    const [teamData, modelData] = await Promise.all([
       api.teams({ page: 0, size: 100, ownerUserId: props.ownerUserId ?? null, enabled: true }),
-      api.directModels(),
-      api.users()
+      api.directModels()
     ]);
     activeTeams.value = teamData.items;
     allModels.value = modelData.items.filter(model => model.enabled).map(model => model.modelName);
-    users.value = userData.items;
+    users.value = props.adminMode ? (await api.users()).items : [];
     if (selected.value) selected.value = knownTeam(selected.value.teamId) ?? selected.value;
     if (selectFallback) {
       const next = selected.value && selected.value.enabled ? knownTeam(selected.value.teamId) : activeTeams.value[0] ?? null;

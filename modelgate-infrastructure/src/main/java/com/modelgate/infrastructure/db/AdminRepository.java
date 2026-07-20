@@ -89,28 +89,22 @@ public class AdminRepository {
                 orgId, DEMO_TEAM_NAME, 60, 600, 120000, 5, 20, 50, JdbcTime.toTimestamp(now));
         long teamId = requireId("SELECT id FROM team WHERE organization_id = ? AND name = ?", orgId, DEMO_TEAM_NAME);
 
-        jdbcTemplate.update("""
-                        INSERT IGNORE INTO platform_user(name, email, enabled, created_at, updated_at)
-                        VALUES (?, ?, 1, ?, ?)
-                        """, "Demo Owner", DEMO_OWNER_EMAIL, JdbcTime.toTimestamp(now), JdbcTime.toTimestamp(now));
-        jdbcTemplate.update("""
-                        INSERT IGNORE INTO platform_user(name, email, enabled, created_at, updated_at)
-                        VALUES (?, ?, 1, ?, ?)
-                        """, "Demo Developer", DEMO_DEVELOPER_EMAIL, JdbcTime.toTimestamp(now), JdbcTime.toTimestamp(now));
-        long ownerUserId = requireId("SELECT id FROM platform_user WHERE email = ?", DEMO_OWNER_EMAIL);
-        long developerUserId = requireId("SELECT id FROM platform_user WHERE email = ?", DEMO_DEVELOPER_EMAIL);
+        SeedUser owner = ensureSeedUser("Demo Owner", DEMO_OWNER_EMAIL, JdbcTime.toTimestamp(now));
+        SeedUser developer = ensureSeedUser("Demo Developer", DEMO_DEVELOPER_EMAIL, JdbcTime.toTimestamp(now));
+        long ownerUserId = owner.userId();
+        long developerUserId = developer.userId();
 
         jdbcTemplate.update("""
                         INSERT IGNORE INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                orgId, teamId, ownerUserId, "Demo Owner", DEMO_OWNER_EMAIL, "OWNER", 1, JdbcTime.toTimestamp(now));
+                orgId, teamId, ownerUserId, "Demo Owner", owner.email(), "OWNER", 1, JdbcTime.toTimestamp(now));
 
         jdbcTemplate.update("""
                         INSERT IGNORE INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                orgId, teamId, developerUserId, "Demo Developer", DEMO_DEVELOPER_EMAIL, "MEMBER", 1, JdbcTime.toTimestamp(now));
+                orgId, teamId, developerUserId, "Demo Developer", developer.email(), "MEMBER", 1, JdbcTime.toTimestamp(now));
         jdbcTemplate.update("UPDATE team SET owner_user_id = ? WHERE id = ?", ownerUserId, teamId);
 
         jdbcTemplate.update("INSERT IGNORE INTO provider(name, provider_type, enabled, created_at) VALUES (?, ?, ?, ?)",
@@ -295,24 +289,38 @@ public class AdminRepository {
         for (int index = 0; index < spec.memberNames().size(); index++) {
             String name = spec.memberNames().get(index);
             String email = "showcase-" + spec.slug() + "-" + index + "@example.com";
-            jdbcTemplate.update("""
-                    INSERT INTO platform_user(name, email, enabled, created_at, updated_at)
-                    VALUES (?, ?, 1, ?, ?)
-                    ON DUPLICATE KEY UPDATE name = VALUES(name), enabled = 1, updated_at = VALUES(updated_at)
-                    """, name, email, now, now);
-            long userId = requireId("SELECT id FROM platform_user WHERE email = ?", email);
+            SeedUser user = ensureSeedUser(name, email, now);
+            long userId = user.userId();
             String role = index == 0 ? "OWNER" : "MEMBER";
             jdbcTemplate.update("""
                     INSERT INTO team_member(organization_id, team_id, user_id, name, email, role, enabled, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, 1, ?)
                     ON DUPLICATE KEY UPDATE team_id = VALUES(team_id), name = VALUES(name), email = VALUES(email), role = VALUES(role), enabled = 1
-                    """, organizationId, teamId, userId, name, email, role, now);
+                    """, organizationId, teamId, userId, name, user.email(), role, now);
             long memberId = requireId("SELECT id FROM team_member WHERE user_id = ?", userId);
             long keyId = ensureShowcaseMemberKey(organizationId, teamId, memberId, spec.slug() + "-" + index, now);
             members.add(new ShowcaseMemberSeed(memberId, keyId));
             if (index == 0) jdbcTemplate.update("UPDATE team SET owner_user_id = ?, status = 'ACTIVE', enabled = 1 WHERE id = ?", userId, teamId);
         }
         return members;
+    }
+
+    /** Seed records keep their original email in normal environments and find their renamed dev account by name. */
+    private SeedUser ensureSeedUser(String name, String originalEmail, Timestamp now) {
+        Long existingByEmail = lookupLong("SELECT id FROM platform_user WHERE email = ?", originalEmail);
+        Long userId = existingByEmail != null ? existingByEmail
+                : lookupLong("SELECT id FROM platform_user WHERE name = ? ORDER BY id LIMIT 1", name);
+        if (userId == null) {
+            jdbcTemplate.update("""
+                    INSERT INTO platform_user(name, email, enabled, created_at, updated_at)
+                    VALUES (?, ?, 1, ?, ?)
+                    """, name, originalEmail, now, now);
+            userId = requireId("SELECT id FROM platform_user WHERE email = ?", originalEmail);
+        } else {
+            jdbcTemplate.update("UPDATE platform_user SET name = ?, enabled = 1, updated_at = ? WHERE id = ?", name, now, userId);
+        }
+        String email = jdbcTemplate.queryForObject("SELECT email FROM platform_user WHERE id = ?", String.class, userId);
+        return new SeedUser(userId, email);
     }
 
     private Map<String, SeedGrant> ensureTeamEntitlements(long teamId, int memberCount, Timestamp now) {
@@ -1090,6 +1098,14 @@ public class AdminRepository {
         return id;
     }
 
+    private Long lookupLong(String sql, Object... args) {
+        try {
+            return jdbcTemplate.queryForObject(sql, Long.class, args);
+        } catch (EmptyResultDataAccessException ex) {
+            return null;
+        }
+    }
+
     private static Set<String> splitAllowedModels(String allowedModels) {
         if (allowedModels == null || allowedModels.isBlank()) {
             return Set.of();
@@ -1121,6 +1137,9 @@ public class AdminRepository {
     }
 
     private record ShowcaseTeamSpec(String slug, String name, List<String> memberNames) {
+    }
+
+    private record SeedUser(long userId, String email) {
     }
 
     private record ShowcaseMemberSeed(long memberId, long keyId) {

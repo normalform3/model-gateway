@@ -15,6 +15,15 @@ modelgate:
     # All gateway instances that share Redis must use the same channel. Set an instance ID in multi-node deployments for traceability.
     invalidation-channel: ${MODELGATE_AUTH_CACHE_INVALIDATION_CHANNEL:modelgate:auth-cache:invalidate:v1}
     instance-id: ${MODELGATE_AUTH_CACHE_INSTANCE_ID:}
+  console-auth:
+    # Generate a BCrypt hash outside the repository. The bootstrap account cannot authenticate until this is set.
+    jwt-secret: ${MODELGATE_CONSOLE_JWT_SECRET}
+    bootstrap-admin-password-hash: ${MODELGATE_BOOTSTRAP_ADMIN_PASSWORD_HASH}
+    # Keep this false outside a local development profile. It resets every console account to a known local password.
+    development-default-credentials-enabled: ${MODELGATE_DEVELOPMENT_DEFAULT_CREDENTIALS_ENABLED:false}
+    # Explicit one-time reset for a fresh local database. Never enable this for an existing environment.
+    initialize-development-credentials: ${MODELGATE_INITIALIZE_DEVELOPMENT_CREDENTIALS:false}
+    refresh-cookie-secure: ${MODELGATE_CONSOLE_REFRESH_COOKIE_SECURE:true}
   provider:
     master-key: ${MODELGATE_PROVIDER_MASTER_KEY}
   mock:

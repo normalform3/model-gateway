@@ -5,11 +5,20 @@ export class ApiError extends Error {
   }
 }
 
+let accessToken: string | null = null;
+let refreshPromise: Promise<LoginResponse | null> | null = null;
+export function setAccessToken(token: string | null) { accessToken = token; }
+
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) }
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), ...(init.headers ?? {}) }
   });
+  if (response.status === 401 && path !== "/auth/login" && path !== "/auth/refresh") {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) return requestJson<T>(path, init);
+  }
   if (!response.ok) {
     try {
       const body = await response.json();
@@ -25,12 +34,24 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   return (await response.json()) as T;
 }
 
+async function refreshAccessToken(): Promise<LoginResponse | null> {
+  if (!refreshPromise) refreshPromise = fetch("/auth/refresh", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" } })
+    .then(async response => response.ok ? await response.json() as LoginResponse : null)
+    .then(response => { accessToken = response?.accessToken ?? null; return response; })
+    .finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
 export interface ProviderSummary { providerId: number; name: string; providerType: string; baseUrl: string | null; enabled: boolean; updatedAt: string }
 export interface ProviderCredential { credentialId: number; providerId: number; name: string; lastFour: string; enabled: boolean; updatedAt: string }
 export interface DirectModel { modelId: number; providerId: number; providerName: string; modelName: string; enabled: boolean; inputPricePerMillion: number; outputPricePerMillion: number; currency: string }
 export interface BootstrapDemoResponse { organizationId: number; teamId: number; quotaAccountId: number; logicalModel: string }
 export interface DemoIdentity { identityId: string; displayName: string; role: "platform-admin" | "team-admin" | "developer"; teamId: number | null; teamName: string | null; memberId: number | null }
 export interface DemoIdentityResponse { initialized: boolean; identities: DemoIdentity[] }
+export type ConsoleRole = "PLATFORM_ADMIN" | "TEAM_ADMIN" | "DEVELOPER" | "UNASSIGNED";
+export interface ConsoleIdentity { userId: number; name: string; email: string; role: ConsoleRole; teamId: number | null; memberId: number | null; passwordChangeRequired: boolean }
+export interface LoginResponse { accessToken: string; tokenType: "Bearer"; expiresInSeconds: number; identity: ConsoleIdentity }
+export interface DevelopmentCredentialsStatus { enabled: boolean }
 export interface PlatformUser { userId: number; name: string; email: string; enabled: boolean; memberId: number | null; teamId: number | null; teamName: string | null; role: "OWNER" | "MEMBER" | null; createdAt: string }
 export interface DeploymentItem { deploymentId: number; providerId: number; name: string; actualModel: string; enabled: boolean; inputPricePerMillion: number; outputPricePerMillion: number; currency: string }
 export interface RouteTargetItem { deploymentId: number; deploymentName: string; providerName: string; weight: number; enabled: boolean }
@@ -73,6 +94,12 @@ export type Query = Record<string, string | number | boolean | null | undefined>
 function withQuery(path: string, query: Query = {}): string { const params = new URLSearchParams(); Object.entries(query).forEach(([key, value]) => { if (value !== null && value !== undefined && value !== "") params.set(key, String(value)); }); const encoded = params.toString(); return encoded ? `${path}?${encoded}` : path; }
 
 export const api = {
+  login: (email: string, password: string) => requestJson<LoginResponse>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }).then(response => { accessToken = response.accessToken; return response; }),
+  refresh: () => refreshAccessToken(),
+  developmentCredentials: () => requestJson<DevelopmentCredentialsStatus>("/auth/development-credentials"),
+  me: () => requestJson<ConsoleIdentity>("/auth/me"),
+  changePassword: (currentPassword: string, newPassword: string) => requestJson<void>("/auth/me/password", { method: "PUT", body: JSON.stringify({ currentPassword, newPassword }) }),
+  logout: () => requestJson<void>("/auth/logout", { method: "POST" }).finally(() => { accessToken = null; }),
   bootstrapDemo: () => requestJson<BootstrapDemoResponse>("/admin/bootstrap/demo", { method: "POST" }),
   demoIdentities: () => requestJson<DemoIdentityResponse>("/admin/demo-identities"),
   users: (query?: Query) => requestJson<{ items: PlatformUser[] }>(withQuery("/admin/users", query)),

@@ -2,6 +2,10 @@ package com.modelgate.bootstrap;
 
 import com.modelgate.auth.VirtualKeyService;
 import com.modelgate.auth.ProviderCredentialCipher;
+import com.modelgate.auth.ConsoleAuthProperties;
+import com.modelgate.auth.ConsoleAuthService;
+import com.modelgate.common.auth.DevelopmentAccountNames;
+import com.modelgate.common.auth.ConsolePrincipal;
 import com.modelgate.common.api.AdminDtos.DemoIdentity;
 import com.modelgate.common.api.AdminDtos.DemoIdentityResponse;
 import com.modelgate.common.api.AdminDtos.CreateTeamRequest;
@@ -36,12 +40,27 @@ import com.modelgate.infrastructure.db.AdminRepository;
 import com.modelgate.infrastructure.db.AdminControlRepository;
 import com.modelgate.infrastructure.db.BillingRepository;
 import com.modelgate.infrastructure.db.UserRepository;
+import com.modelgate.infrastructure.db.ConsoleAuthRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.nimbusds.jose.jwk.source.ImmutableSecret;
+import com.nimbusds.jose.proc.SecurityContext;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.ReactiveSecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
+import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
+import org.springframework.mock.web.server.MockServerWebExchange;
 import reactor.test.StepVerifier;
 
 import java.util.ArrayList;
@@ -53,6 +72,9 @@ import java.util.Base64;
 import java.time.OffsetDateTime;
 import java.time.LocalDate;
 import java.io.InputStream;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -69,6 +91,132 @@ class MvpUnitTests {
         assertThat(hash).hasSize(64);
         assertThat(hash).isEqualTo(VirtualKeyService.sha256("mg-key-example-value"));
         assertThat(hash).doesNotContain("mg-key-example-value");
+    }
+
+    @Test
+    void developmentAccountsNormalizeNamesAndAvoidExistingAccounts() {
+        assertThat(DevelopmentAccountNames.emailFor(" Demo Owner ", 1)).isEqualTo("demo-owner@modelgate.local");
+        assertThat(DevelopmentAccountNames.emailFor("张 三", 2)).isEqualTo("张-三-2@modelgate.local");
+
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate();
+        assertThat(new ConsoleAuthRepository(jdbcTemplate).nextDevelopmentEmail("Demo Owner"))
+                .isEqualTo("demo-owner-2@modelgate.local");
+    }
+
+    @Test
+    void developmentCredentialsResetToKnownPasswordOnlyWhenEnabled() {
+        ConsoleAuthProperties enabled = new ConsoleAuthProperties();
+        enabled.setDevelopmentDefaultCredentialsEnabled(true);
+        BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+        RecordingConsoleAuthRepository repository = new RecordingConsoleAuthRepository();
+        ConsoleAuthService service = new ConsoleAuthService(repository, enabled, passwordEncoder, jwtEncoder(), token -> null);
+
+        service.resetDevelopmentCredentialsIfEnabled();
+
+        assertThat(repository.resetCount).isEqualTo(1);
+        assertThat(passwordEncoder.matches("123", repository.passwordHash)).isTrue();
+
+        ConsoleAuthProperties disabled = new ConsoleAuthProperties();
+        ConsoleAuthService disabledService = new ConsoleAuthService(repository, disabled, passwordEncoder, jwtEncoder(), token -> null);
+        disabledService.resetDevelopmentCredentialsIfEnabled();
+        assertThat(repository.resetCount).isEqualTo(1);
+    }
+
+    @Test
+    void developmentPasswordCanLogInWithoutPasswordChangeRequirement() {
+        ConsoleAuthProperties properties = new ConsoleAuthProperties();
+        properties.setDevelopmentDefaultCredentialsEnabled(true);
+        BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+        RecordingConsoleAuthRepository repository = new RecordingConsoleAuthRepository();
+        repository.account = new ConsoleAuthRepository.Account(1L, "ModelGate Administrator", "admin",
+                passwordEncoder.encode("123"), false, true);
+        ConsoleAuthService service = new ConsoleAuthService(repository, properties, passwordEncoder, jwtEncoder(), token -> null);
+
+        ConsoleAuthService.SessionLogin login = service.login("admin", "123");
+
+        assertThat(login.response().identity().role()).isEqualTo("PLATFORM_ADMIN");
+        assertThat(login.response().identity().passwordChangeRequired()).isFalse();
+    }
+
+    @Test
+    void enabledUserWithoutAnActiveTeamCanLogInWithARestrictedIdentity() {
+        ConsoleAuthProperties properties = new ConsoleAuthProperties();
+        BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+        RecordingConsoleAuthRepository repository = new RecordingConsoleAuthRepository();
+        repository.account = new ConsoleAuthRepository.Account(8L, "Unassigned User", "unassigned@modelgate.local",
+                passwordEncoder.encode("123"), false, true);
+        repository.principal = new ConsolePrincipal(8L, "Unassigned User", "unassigned@modelgate.local",
+                "UNASSIGNED", null, null, false, "session-1");
+        ConsoleAuthService service = new ConsoleAuthService(repository, properties, passwordEncoder, jwtEncoder(), token -> null);
+
+        ConsoleAuthService.SessionLogin login = service.login("unassigned@modelgate.local", "123");
+
+        assertThat(login.response().identity().role()).isEqualTo("UNASSIGNED");
+        assertThat(login.response().identity().teamId()).isNull();
+        assertThat(login.response().identity().memberId()).isNull();
+    }
+
+    @Test
+    void consoleLoginSignsAnHs256AccessToken() {
+        ConsoleAuthProperties properties = new ConsoleAuthProperties();
+        BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+        RecordingConsoleAuthRepository repository = new RecordingConsoleAuthRepository();
+        repository.account = new ConsoleAuthRepository.Account(1L, "ModelGate Administrator", "admin",
+                passwordEncoder.encode("123"), false, true);
+        SecretKey signingKey = new SecretKeySpec("01234567890123456789012345678901".getBytes(StandardCharsets.UTF_8), "HmacSHA256");
+        JwtEncoder encoder = new NimbusJwtEncoder(new ImmutableSecret<SecurityContext>(signingKey));
+        JwtDecoder decoder = NimbusJwtDecoder.withSecretKey(signingKey).macAlgorithm(MacAlgorithm.HS256).build();
+        ConsoleAuthService service = new ConsoleAuthService(repository, properties, passwordEncoder, encoder, decoder);
+
+        String token = service.login("admin", "123").response().accessToken();
+
+        assertThat(decoder.decode(token).getClaimAsString("typ")).isEqualTo("console");
+    }
+
+    @Test
+    void teamAdminCanAccessOwnApiKeyAndQuotaEndpointsWithoutRunningTheChainTwice() {
+        var filter = new ConsoleSecurityConfiguration().consoleRoleAuthorizationFilter();
+        var principal = new ConsolePrincipal(7L, "Demo Owner", "demo-owner@modelgate.local", "TEAM_ADMIN", 3L, 15L, false, "session-1");
+        var authentication = new UsernamePasswordAuthenticationToken(principal, null, List.of());
+
+        for (String path : List.of("/admin/members/15/api-key-status", "/admin/members/15/quota", "/admin/members/15/api-keys/generate")) {
+            AtomicInteger invocations = new AtomicInteger();
+            var exchange = MockServerWebExchange.from(MockServerHttpRequest.get(path).build());
+
+            filter.filter(exchange, ignored -> {
+                        invocations.incrementAndGet();
+                        return reactor.core.publisher.Mono.empty();
+                    })
+                    .contextWrite(ReactiveSecurityContextHolder.withAuthentication(authentication))
+                    .block();
+
+            assertThat(invocations).as(path).hasValue(1);
+            assertThat(exchange.getResponse().getStatusCode()).as(path).isNull();
+        }
+    }
+
+    @Test
+    void unassignedUserCannotAccessAdminEndpoints() {
+        var filter = new ConsoleSecurityConfiguration().consoleRoleAuthorizationFilter();
+        var principal = new ConsolePrincipal(8L, "Unassigned User", "unassigned@modelgate.local", "UNASSIGNED", null, null, false, "session-1");
+        var authentication = new UsernamePasswordAuthenticationToken(principal, null, List.of());
+        AtomicInteger invocations = new AtomicInteger();
+        var exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/admin/models").build());
+
+        filter.filter(exchange, ignored -> {
+                    invocations.incrementAndGet();
+                    return reactor.core.publisher.Mono.empty();
+                })
+                .contextWrite(ReactiveSecurityContextHolder.withAuthentication(authentication))
+                .block();
+
+        assertThat(invocations).hasValue(0);
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.FORBIDDEN);
+    }
+
+    private static JwtEncoder jwtEncoder() {
+        return parameters -> new Jwt("test-access-token", java.time.Instant.now(), java.time.Instant.now().plusSeconds(60),
+                Map.of("alg", "HS256"), Map.of("typ", "console"));
     }
 
     @Test
@@ -690,6 +838,9 @@ class MvpUnitTests {
                 if (sql.contains("m.user_id = t.owner_user_id") && sql.contains("m.role = 'OWNER'")) return requiredType.cast(ownerScopeCount);
                 return requiredType.cast(1);
             }
+            if (requiredType == String.class && sql.contains("SELECT email FROM platform_user")) {
+                return requiredType.cast("demo@example.com");
+            }
             throw new IllegalArgumentException("Unexpected result type: " + requiredType.getName());
         }
 
@@ -712,6 +863,9 @@ class MvpUnitTests {
 
         @Override
         public <T> List<T> queryForList(String sql, Class<T> elementType, Object... args) {
+            if (elementType == String.class && sql.contains("SELECT email FROM platform_user")) {
+                return List.of(elementType.cast("demo-owner@modelgate.local"));
+            }
             if (elementType == String.class && sql.contains("SELECT key_hash FROM virtual_api_key")) {
                 return List.of(elementType.cast("key-hash-1"));
             }
@@ -739,9 +893,47 @@ class MvpUnitTests {
         }
 
         @Override
+        public <T> List<T> queryForList(String sql, Class<T> elementType) {
+            return queryForList(sql, elementType, new Object[0]);
+        }
+
+        @Override
         public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
             queries.add(sql);
             return List.of();
+        }
+    }
+
+    private static final class RecordingConsoleAuthRepository extends ConsoleAuthRepository {
+        private int resetCount;
+        private String passwordHash;
+        private ConsoleAuthRepository.Account account;
+        private ConsolePrincipal principal;
+
+        private RecordingConsoleAuthRepository() {
+            super(new JdbcTemplate());
+        }
+
+        @Override
+        public void resetDevelopmentCredentials(String passwordHash) {
+            resetCount++;
+            this.passwordHash = passwordHash;
+        }
+
+        @Override
+        public java.util.Optional<ConsoleAuthRepository.Account> findEnabledAccountByEmail(String email) {
+            return account == null || !account.email().equals(email) ? java.util.Optional.empty() : java.util.Optional.of(account);
+        }
+
+        @Override
+        public void createSession(String sessionId, long userId, String refreshHash, OffsetDateTime expiresAt) {
+        }
+
+        @Override
+        public java.util.Optional<ConsolePrincipal> findActivePrincipal(long userId, String sessionId) {
+            if (principal != null) return java.util.Optional.of(principal);
+            return java.util.Optional.of(new ConsolePrincipal(userId, "ModelGate Administrator", "admin",
+                    "PLATFORM_ADMIN", null, null, false, sessionId));
         }
     }
 

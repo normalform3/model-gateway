@@ -107,9 +107,13 @@ public record ApiKeyContext(
 - `enabled`
 - `created_at`
 
-`virtual_api_key.owner_member_id` 指向实际使用者。MVP 暂不做登录和 RBAC 校验，但负责人上下文仍必须与团队所有者关系匹配，便于后续接入权限系统。
+`virtual_api_key.owner_member_id` 指向实际使用者。控制台认证与虚拟 API Key 鉴权相互独立：前者保护管理操作，后者只保护 `/v1/**` 模型调用。
 
-控制台可直接选择负责人或开发成员用户切换上下文；该选择只控制筛选范围，不构成登录、认证或 RBAC。
+`platform_user.platform_admin=1` 表示 `PLATFORM_ADMIN`；启用团队中的 `OWNER` 与 `MEMBER` 分别映射 `TEAM_ADMIN` 与 `DEVELOPER`。已启用但未加入活动团队的普通用户映射为受限的 `UNASSIGNED`，可登录查看账户状态，但没有团队、额度或控制面操作权限。平台管理员不能同时拥有活动团队成员关系。
+
+`platform_user.password_hash` 仅保存 BCrypt 哈希，`password_change_required` 用于首次登录改密。`auth_session` 保存刷新令牌 SHA-256 哈希、到期时间和撤销状态；access token 不入库。
+
+本地 `dev` profile 可重置 `platform_user.email`、`password_hash` 和 `password_change_required` 以提供可预测的开发凭据，并撤销现有 `auth_session`。这不是数据库迁移或生产账号策略；未启用该 profile 时，邮箱和密码数据保持常规管理行为。
 
 移出成员不是删除 `platform_user`，而是将 `team_member.enabled` 置为 `0`：当前成员模型权益、兼容访问记录和虚拟 Key 会立即失效，调用、用量和账单事实继续保留原 `member_id` 与 `team_id`。重新加入时复用同一成员记录，但不会恢复旧权益或旧 Key。
 

@@ -61,7 +61,8 @@ public final class AdminDtos {
     public record UserListResponse(List<UserItem> items) {
     }
 
-    public record CreateUserRequest(@NotBlank String name, @NotBlank String email, Boolean enabled) {
+    public record CreateUserRequest(@NotBlank String name, String email, String initialPassword,
+                                    Boolean enabled) {
     }
 
     public record UpdateUserRequest(String name, String email, Boolean enabled) {

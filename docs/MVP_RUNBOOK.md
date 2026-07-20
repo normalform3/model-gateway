@@ -21,10 +21,12 @@ export MODELGATE_ROCKETMQ_ENDPOINTS='<nameserver-host>:9876'
 
 ```bash
 mvn -pl modelgate-bootstrap -am install
-mvn -pl modelgate-bootstrap spring-boot:run
+SPRING_PROFILES_ACTIVE=dev mvn -pl modelgate-bootstrap spring-boot:run
 ```
 
-第一条命令会先构建并安装 `modelgate-bootstrap` 依赖的本地模块；第二条命令只启动含有 `ModelGateApplication` 的 bootstrap 模块。不要对带 `-am` 的完整 reactor 直接执行 `spring-boot:run`，否则 Maven 会尝试运行父聚合模块并报找不到 main class。
+第一条命令会先构建并安装 `modelgate-bootstrap` 依赖的本地模块；第二条命令只启动含有 `ModelGateApplication` 的 bootstrap 模块，并启用本地开发凭据。不要对带 `-am` 的完整 reactor 直接执行 `spring-boot:run`，否则 Maven 会尝试运行父聚合模块并报找不到 main class。
+
+未指定 profile 的本地启动和 `dev` profile 支持开发期账号规则，但不会在启动时修改数据库。只有显式设置 `MODELGATE_INITIALIZE_DEVELOPMENT_CREDENTIALS=true` 时，才会撤销会话并将平台管理员初始化为 `admin / 123`、其他用户初始化为名称账号与密码 `123`。新拉取仓库且需要初始化空本地数据库时，可执行 `bash tools/init-dev-console-credentials.sh`；不要在已有开发、测试或生产数据库上运行该脚本。生产环境必须显式使用非 `default` 的 profile 或设置 `MODELGATE_DEVELOPMENT_DEFAULT_CREDENTIALS_ENABLED=false`；绝不能以默认配置暴露到公网。
 
 ## 启动前端控制台
 
@@ -44,7 +46,7 @@ npm run dev
 curl -X POST http://localhost:8080/admin/bootstrap/demo
 ```
 
-响应中记录 `organizationId`、`teamId` 和 `quotaAccountId`。初始化会幂等保留 Demo Team Owner，并创建 Demo Developer；不会生成密码、登录会话或可用明文 Key。
+响应中记录 `organizationId`、`teamId` 和 `quotaAccountId`。初始化会幂等保留 Demo Team Owner，并创建 Demo Developer；在 `dev` profile 下，初始化完成后会重新生成其开发期账号和密码；不会生成可用明文 Key。
 
 前端也会在尚未初始化时显示“初始化演示数据”。初始化后可通过侧边栏切换平台管理员、团队负责人和开发成员。该切换只影响展示和默认筛选，不能用于权限验证；开发环境不得把未受保护的管理接口暴露到公网。
 

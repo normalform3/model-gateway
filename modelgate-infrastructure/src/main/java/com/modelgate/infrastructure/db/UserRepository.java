@@ -54,12 +54,13 @@ public class UserRepository {
         return new UserListResponse(items);
     }
 
-    public UserItem create(CreateUserRequest request) {
+    public UserItem create(CreateUserRequest request, String email, String passwordHash, boolean passwordChangeRequired) {
         try {
             long id = GeneratedKeys.insert(jdbcTemplate, """
-                    INSERT INTO platform_user(name, email, enabled, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """, request.name().trim(), request.email().trim().toLowerCase(), bool(request.enabled(), true), now(), now());
+                    INSERT INTO platform_user(name, email, enabled, password_hash, password_change_required, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, request.name().trim(), email.trim().toLowerCase(), bool(request.enabled(), true), passwordHash,
+                    passwordChangeRequired ? 1 : 0, now(), now());
             return require(id);
         } catch (DuplicateKeyException ex) {
             throw badRequest("A user already exists with this email.");

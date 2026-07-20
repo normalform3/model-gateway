@@ -4,7 +4,7 @@
 
 - MVP 对外优先提供 OpenAI 风格接口，降低业务应用接入成本。
 - 业务应用使用控制台登记的真实模型名，例如 `gpt-4o`；同名模型全局唯一。
-- 所有需要鉴权的接口使用 `Authorization: Bearer mg-key-example` 形式的虚拟 Key。
+- `/v1/**` 使用 `Authorization: Bearer mg-key-example` 形式的虚拟 Key；控制台 `/admin/**` 使用短期 Bearer access token，不能混用。
 - 示例中的 Key、URL、ID 均为占位符，不代表真实凭据或真实租户。
 - 错误响应必须可诊断，但不得暴露真实 Provider 密钥、私有端点或内部堆栈。
 
@@ -116,11 +116,13 @@ MVP 控制面接口可以先面向内部管理后台，不要求完全公开。
 
 `GET/POST /admin/users`、`PATCH/DELETE /admin/users/{userId}` 管理全局用户。删除用户会在同一事务中清理其成员关系、虚拟 Key、用量、账单和额度数据；用户最多属于一个**活动**团队，已停用的成员关系保留为历史并可重新加入其他团队。`POST /admin/teams/{teamId}/dissolve` 是控制台使用的团队终态操作：它将团队标为 `DISSOLVED` 并停用团队、成员和 Key，同时保留平台用户、调用、用量、账单、权益与额度流水，且不能通过常规更新接口恢复。现有 `DELETE /admin/teams/{teamId}` 仍是物理清理接口，不在控制台暴露。管理员设置团队负责人时只能选择启用、未归属其他活动团队的现有用户。
 
-控制台可按角色选择用户：负责人仅请求其所属团队，也可生成和轮换自己的个人 Key；开发成员仅查看自己的 Key。负责人同样可切换到开发成员视角。该选择只影响导航和默认筛选，**不构成登录、鉴权或 RBAC**。
+控制台在 `POST /auth/login` 完成统一账号密码登录，`POST /auth/refresh` 以 HttpOnly Cookie 轮换刷新令牌，`POST /auth/logout` 撤销当前会话，`GET /auth/me` 返回当前有效角色，`PUT /auth/me/password` 完成首次或常规改密。`GET /auth/development-credentials` 仅返回开发期固定凭据模式是否启用，不返回密码。平台管理员、团队管理员和开发者的控制面权限由服务端按实时成员关系校验；已启用但未加入活动团队的普通用户以 `UNASSIGNED` 身份登录，仅可访问认证相关接口，不能执行控制面操作。
+
+当服务器启用 `dev` profile 的开发期凭据模式时，`POST /admin/users` 仅要求 `name`，服务端忽略可选的 `email` 和 `initialPassword` 并生成名称账号与固定本地初始密码；响应仍只返回账号，不返回密码。其他环境保持邮箱和 12–72 位初始密码为必填项。
 
 ## 团队和成员管理
 
-MVP 暂不引入真实登录和 RBAC，但控制面先落企业、团队、成员和成员 Key 的数据关系。
+控制面使用真实登录和 RBAC；团队与成员接口中的路径 ID 仍用于定位资源，但不再代表操作者身份。
 
 ### 创建团队
 

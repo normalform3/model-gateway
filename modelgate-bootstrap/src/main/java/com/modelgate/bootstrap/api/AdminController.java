@@ -1,12 +1,15 @@
 package com.modelgate.bootstrap.api;
 
 import com.modelgate.auth.VirtualKeyService;
+import com.modelgate.auth.ConsoleAuthService;
 import com.modelgate.auth.TeamAccessService;
 import com.modelgate.auth.ProjectCredentialService;
 import com.modelgate.auth.ProviderCredentialCipher;
 import com.modelgate.common.api.AdminDtos.*;
 import com.modelgate.common.domain.ModelQuotaPolicy;
 import com.modelgate.common.domain.QuotaMode;
+import com.modelgate.common.error.ErrorCode;
+import com.modelgate.common.error.ModelGateException;
 import com.modelgate.infrastructure.db.AdminControlRepository;
 import com.modelgate.infrastructure.db.AdminRepository;
 import com.modelgate.infrastructure.db.QuotaAccountRepository;
@@ -32,6 +35,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.time.LocalDate;
 
@@ -54,6 +58,8 @@ public class AdminController {
     private final ProjectRepository projectRepository;
     private final ProjectCredentialService projectCredentialService;
     private final ProviderModelQuotaPoolRepository providerModelQuotaPoolRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final ConsoleAuthService consoleAuthService;
 
     public AdminController(
             AdminRepository adminRepository,
@@ -70,7 +76,9 @@ public class AdminController {
             QuotaService quotaService,
             ProjectRepository projectRepository,
             ProjectCredentialService projectCredentialService,
-            ProviderModelQuotaPoolRepository providerModelQuotaPoolRepository
+            ProviderModelQuotaPoolRepository providerModelQuotaPoolRepository,
+            PasswordEncoder passwordEncoder,
+            ConsoleAuthService consoleAuthService
     ) {
         this.adminRepository = adminRepository;
         this.quotaAccountRepository = quotaAccountRepository;
@@ -87,6 +95,8 @@ public class AdminController {
         this.projectRepository = projectRepository;
         this.projectCredentialService = projectCredentialService;
         this.providerModelQuotaPoolRepository = providerModelQuotaPoolRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.consoleAuthService = consoleAuthService;
     }
 
     @PostMapping("/bootstrap/demo")
@@ -114,7 +124,22 @@ public class AdminController {
 
     @PostMapping("/users")
     public Mono<UserItem> createUser(@Valid @RequestBody CreateUserRequest request) {
-        return Mono.fromCallable(() -> userRepository.create(request)).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> {
+            if (consoleAuthService.developmentDefaultCredentialsEnabled()) {
+                return userRepository.create(request, consoleAuthService.nextDevelopmentEmail(request.name()),
+                        consoleAuthService.developmentDefaultPasswordHash(), false);
+            }
+            validateProductionInitialCredentials(request);
+            return userRepository.create(request, request.email(), passwordEncoder.encode(request.initialPassword()), true);
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private static void validateProductionInitialCredentials(CreateUserRequest request) {
+        if (request.email() == null || request.email().isBlank() || request.initialPassword() == null
+                || request.initialPassword().length() < 12 || request.initialPassword().length() > 72) {
+            throw new ModelGateException(ErrorCode.BAD_MODEL_REQUEST,
+                    "Email and an initial password between 12 and 72 characters are required outside development mode.");
+        }
     }
 
     @PatchMapping("/users/{userId}")
